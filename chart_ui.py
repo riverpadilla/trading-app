@@ -1,3 +1,4 @@
+"""Modulo generador de gráficos, usando datos de Binance y TA-Lib para indicadores técnicos."""
 import tkinter as tk
 from tkinter import ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -5,30 +6,32 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import requests
 import pandas as pd
-import talib
+import talib  # pylint: disable=no-member
 import estrategia
 
 # --- Parámetros de la interfaz ---
 SYMBOLS = ["BNBUSDT", "USDTARS"]
 INTERVALS = ["1s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-BINANCE_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_URL = "https://api.binance.us/api/v3/klines"
 
-# --- Funciones de indicadores ---
+"""Funciones para calcular indicadores técnicos usando TA-Lib."""
 def sma(values, window):
     # TA-Lib SMA
-    return pd.Series(talib.SMA(values.values, timeperiod=window), index=values.index)
+    return pd.Series(talib.SMA(values.values, timeperiod=window), index=values.index) # pylint: disable=no-member
 
+""" --- Indicadores técnicos con TA-Lib ---"""
 def rsi(values, window=14):
     # TA-Lib espera un array numpy
-    return pd.Series(talib.RSI(values.values, timeperiod=window), index=values.index)
+    return pd.Series(talib.RSI(values.values, timeperiod=window), index=values.index) # pylint: disable=no-member
 
+""" --- Indicadores técnicos con TA-Lib ---"""
 def macd(values, fast=12, slow=26, signal=9):
     # TA-Lib MACD
-    macd_line, signal_line, _ = talib.MACD(values.values, fastperiod=fast, slowperiod=slow, signalperiod=signal)
+    macd_line, signal_line, _ = talib.MACD(values.values, fastperiod=fast, slowperiod=slow, signalperiod=signal) # pylint: disable=no-member
     # Devuelve como pd.Series para mantener compatibilidad
     return pd.Series(macd_line, index=values.index), pd.Series(signal_line, index=values.index)
 
-# --- Obtener datos de Binance ---
+""" --- Obtener datos históricos de Binance ---"""
 def obtener_historico_binance(symbol, interval, limit=1000):
     params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
     response = requests.get(BINANCE_URL, params=params, timeout=10)
@@ -51,17 +54,17 @@ def obtener_historico_binance(symbol, interval, limit=1000):
     df.set_index("Close time", inplace=True)
     return df
 
-# --- Procesar indicadores y señales ---
+""" --- Procesar indicadores y señales ---"""
 def procesar_indicadores(df):
     df["MA7"] = sma(df["Close"], 7)
     df["MA25"] = sma(df["Close"], 25)
-    df["MA50"] = sma(df["Close"], 50)  # <--- Indicador MA50 agregado
+    df["MA50"] = sma(df["Close"], 50)
     df["MA99"] = sma(df["Close"], 99)
     df["RSI"] = rsi(df["Close"], 14)
     df["MACD"], df["Signal"] = macd(df["Close"])
     return df
 
-# --- Graficar ---
+""" --- Incluye los valores actuales en la gráfica ---"""
 def mostrar_valores_actuales(df):
     ultimo = df.iloc[-1]
     color_vela = 'green' if ultimo['Close'] >= ultimo['Open'] else 'red'
@@ -128,7 +131,8 @@ def mostrar_valores_actuales(df):
         fontsize=11, color='green' if (ultimo['MACD'] - ultimo['Signal']) >= 0 else 'red', ha='left', va='top',
         bbox=dict(facecolor='none', edgecolor='gray', boxstyle=boxstyle, linewidth=1)
     )
-
+    
+""" --- Graficar ---"""
 def plot_charts(df):
     df_plot = df.copy()
     df_plot.index.name = 'Date'
@@ -171,6 +175,7 @@ actualizando = True
 canvas = None
 fig = None
 
+""" --- Funciones de la interfaz gráfica ---"""
 def cargar_datos():
     symbol = symbol_var.get()
     interval = interval_var.get()
@@ -214,6 +219,7 @@ def cargar_datos():
         error_label = tk.Label(frame_chart, text=f"Error al obtener datos: {e}", fg="red")
         error_label.pack()
 
+""" --- Configuración de la interfaz gráfica ---"""
 def inicializar_grafico():
     global fig, axes, canvas
     plt.style.use('dark_background')  # <-- Fondo oscuro
@@ -221,6 +227,7 @@ def inicializar_grafico():
     canvas = FigureCanvasTkAgg(fig, master=frame_chart)
     canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+""" --- Actualización periódica del gráfico ---"""
 def actualizar_grafico():
     global actualizando, axes
     if actualizando:
@@ -342,5 +349,5 @@ if __name__ == "__main__":
     actualizar_grafico()
     root.mainloop()
     main()
-    
+
 
