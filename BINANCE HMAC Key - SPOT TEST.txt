@@ -1,0 +1,9 @@
+BINANCE SPOT TEST NETWORK
+
+
+HMAC-SHA-256 Key registered
+Save these values right now. They won't be shown ever again!
+
+API Key: 7ZPT9vq9NRD8rDcV87ykvrPWBPQzPuZ9QkLKLLxGguQaDvT5mACl4nQSP8uwGxBH
+
+Secret Key: SpCz5aKF9c16gpJec6EQ3r0BC4GAqjmTO1Bevh2193mvVEEdClpIhP2jx7Wf1QFO
