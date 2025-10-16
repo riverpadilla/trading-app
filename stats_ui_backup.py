@@ -14,7 +14,7 @@ def obtener_datos_binance(symbol, interval, limit=10000):
     """Obtiene datos históricos de velas desde Binance US con paginación hacia atrás (endTime) hasta 10000.
 
     Estrategia: pedir el último lote disponible y continuar pidiendo lotes más antiguos
-    usando endTime = (primer Open time del lote) - 1, hasta completar limit o no
+    usando endTime = (primer Open time del lote) - 1, hasta completar 'limit' o no
     haya más datos. Al final, se ordena por tiempo y se recortan las velas más recientes.
     """
     try:
@@ -39,7 +39,7 @@ def obtener_datos_binance(symbol, interval, limit=10000):
             data = response.json()
 
             if not data:
-                print("Paginación: No más datos disponibles. Total: {0}".format(total))
+                print(f"Paginación: No más datos disponibles. Total: {total}")
                 break
 
             df_batch = pd.DataFrame(
@@ -52,37 +52,39 @@ def obtener_datos_binance(symbol, interval, limit=10000):
             )
 
             batch_count = len(df_batch)
-            first_open_time_ms = int(df_batch.iloc[0]["Open time"])
-            last_close_time_ms = int(df_batch.iloc[-1]["Close time"])
+            first_open_time_ms = int(df_batch.iloc[0]["Open time"])  # más antiguo dentro del lote
+            last_close_time_ms = int(df_batch.iloc[-1]["Close time"])  # más reciente dentro del lote
             lote += 1
 
             print(
-                "Lote {0}: {1} registros, Open time: {2}, Close time: {3}".format(
-                    lote, batch_count, first_open_time_ms, last_close_time_ms
-                )
+                f"Lote {lote}: {batch_count} registros, Open time: {first_open_time_ms}, Close time: {last_close_time_ms}"
             )
 
             frames.append(df_batch)
             total += batch_count
             remaining -= batch_count
 
+            # Preparar siguiente página: pedir velas ANTERIORES al primer Open time del lote actual
             end_time_ms = first_open_time_ms - 1
 
             if batch_count < batch_limit:
-                print("Lote incompleto. Total final: {0}".format(total))
+                print(f"Lote incompleto. Total final: {total}")
                 break
 
         if not frames:
             return pd.DataFrame()
 
+        # Unir y ordenar cronológicamente; eliminar posibles duplicados por Open time
         df = pd.concat(frames, ignore_index=True)
         df.drop_duplicates(subset=["Open time"], keep="last", inplace=True)
         df.sort_values(by="Open time", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
+        # Mantener las N más recientes si por algún motivo hubiese más
         if len(df) > limit:
             df = df.iloc[-limit:].copy()
 
+        # Conversiones de tipo
         df["Open time"] = pd.to_datetime(df["Open time"], unit="ms")
         df["Close time"] = pd.to_datetime(df["Close time"], unit="ms")
         df["Open"] = df["Open"].astype(float)
@@ -91,21 +93,21 @@ def obtener_datos_binance(symbol, interval, limit=10000):
         df["Close"] = df["Close"].astype(float)
         df["Volume"] = df["Volume"].astype(float)
 
-        print("Datos finales: {0} registros".format(len(df)))
+        print(f"Datos finales: {len(df)} registros")
         return df
     except requests.exceptions.RequestException as e:
-        print("Error al obtener datos de Binance: {0}".format(e))
+        print(f"Error al obtener datos de Binance: {e}")
         return pd.DataFrame()
 
 def mostrar_tabla_estadisticas(df, symbol="", interval=""):
     stats_df = estrategia2.calcular_estadisticas(df)
-    fecha_inicio = df["Close time"].min().strftime("%Y-%m-%d %H:%M:%S") if "Close time" in df.columns else "N/A"
-    fecha_fin = df["Close time"].max().strftime("%Y-%m-%d %H:%M:%S") if "Close time" in df.columns else "N/A"
+    fecha_inicio = df['Close time'].min().strftime('%Y-%m-%d %H:%M:%S') if 'Close time' in df.columns else "N/A"
+    fecha_fin = df['Close time'].max().strftime('%Y-%m-%d %H:%M:%S') if 'Close time' in df.columns else "N/A"
 
     root = tk.Tk()
-    titulo = "Estadísticas de Variación - {0} ({1})".format(symbol, interval)
+    titulo = f"Estadísticas de Variación - {symbol} ({interval})"
     if fecha_inicio != "N/A":
-        titulo += " | {0}  {1}".format(fecha_inicio, fecha_fin)
+        titulo += f" | {fecha_inicio} → {fecha_fin}"
     root.title(titulo)
 
     frame = ttk.Frame(root)
@@ -120,31 +122,23 @@ def mostrar_tabla_estadisticas(df, symbol="", interval=""):
     tree.heading("Open/High", text="Open/High")
     tree.heading("Close/Low", text="Close/Low")
 
-    tree.column("Estadística", anchor=tk.W, width=400)
+    tree.column("Estadística", anchor=tk.W, width=350)
     tree.column("Valor", anchor=tk.CENTER, width=120)
-    tree.column("Fecha/Hora", anchor=tk.CENTER, width=200)
+    tree.column("Fecha/Hora", anchor=tk.CENTER, width=180)
     tree.column("Open/High", anchor=tk.CENTER, width=120)
-    tree.column("Close/Low", anchor=tk.CENTER, width=140)
+    tree.column("Close/Low", anchor=tk.CENTER, width=120)
 
     for _, row in stats_df.iterrows():
-            valor = row.get("Valor", 0)
-            if isinstance(valor, str):
-                valor_str = valor
-            else:
-                valor_str = "{0:.6f}".format(valor)
-            open_high_str = "{0}".format(row.get("Open/High", "")) if row.get("Open/High", "") != "" else ""
-            close_low_str = "{0}".format(row.get("Close/Low", "")) if row.get("Close/Low", "") != "" else ""
-        
-            tree.insert(
-                "", tk.END,
-                values=(
-                    row.get("Estadística", ""),
-                    valor_str,
-                    row.get("Fecha/Hora", ""),
-                    open_high_str,
-                    close_low_str
-                )
+        tree.insert(
+            "", tk.END,
+            values=(
+                row.get("Estadística", ""),
+                f"{row.get('Valor', 0):.6f}",
+                row.get("Fecha/Hora", ""),
+                f"{row.get('Open/High', '')}" if row.get('Open/High', '') != '' else '',
+                f"{row.get('Close/Low', '')}" if row.get('Close/Low', '') != '' else ''
             )
+        )
 
     tree.pack(fill=tk.BOTH, expand=True)
     ttk.Button(root, text="Cerrar", command=root.destroy).pack(pady=10)
@@ -153,7 +147,7 @@ def mostrar_tabla_estadisticas(df, symbol="", interval=""):
 def interfaz_principal():
     root = tk.Tk()
     root.title("Estadísticas de Trading - Binance US")
-    root.geometry("600x400")
+    root.geometry("600x350")
     
     main_frame = ttk.Frame(root, padding="20")
     main_frame.pack(fill=tk.BOTH, expand=True)
@@ -178,28 +172,36 @@ def interfaz_principal():
     
     ttk.Label(config_frame, text="Cantidad de datos:", font=("Arial", 10)).grid(row=2, column=0, padx=10, pady=5, sticky="e")
     limit_var = tk.IntVar(value=100)
+
+    # Crear primero la variable de entrada para evitar NameError en el callback del slider
     limit_entry_var = tk.StringVar(value=str(limit_var.get()))
 
-    def on_limit_slider_change(value):
+    def on_slider_change(value):
+        # Se invoca cuando se mueve el slider
         limit_var.set(int(float(value)))
         try:
             limit_entry_var.set(str(limit_var.get()))
         except Exception:
             pass
 
-    def on_limit_entry_change(*args):
+    def on_entry_change(*args):
+        # Se invoca cuando cambia el texto del entry (se activará tras crear el slider)
         try:
             v = int(limit_entry_var.get())
+            # Ajustar a múltiplos de 100 y límites [100, 10000]
             if v < 100:
                 v = 100
             if v > 10000:
                 v = 10000
+            # Redondear al múltiplo de 100 más cercano
             v = int(round(v / 100.0)) * 100
             limit_var.set(v)
+            # limit_slider ya existe cuando el trace está activo
             limit_slider.set(v)
         except ValueError:
             pass
 
+    # Crear slider (pasos de 100) después de definir variables y callbacks
     limit_slider = tk.Scale(
         config_frame,
         from_=100,
@@ -207,14 +209,15 @@ def interfaz_principal():
         orient=tk.HORIZONTAL,
         length=200,
         resolution=100,
-        command=on_limit_slider_change,
+        command=on_slider_change,
     )
     limit_slider.set(limit_var.get())
     limit_slider.grid(row=2, column=1, padx=10, pady=5, sticky="we")
 
+    # Crear entry y luego activar el trace para evitar disparos antes de que exista el slider
     limit_entry = ttk.Entry(config_frame, textvariable=limit_entry_var, width=8, font=("Arial", 10))
     limit_entry.grid(row=2, column=2, padx=10, pady=5)
-    limit_entry_var.trace_add("write", on_limit_entry_change)
+    limit_entry_var.trace_add('write', on_entry_change)
     
     status_label = ttk.Label(main_frame, text="", font=("Arial", 9), foreground="blue")
     status_label.pack(pady=(5, 10))
@@ -231,7 +234,7 @@ def interfaz_principal():
             status_label.config(text="Error: Límite debe ser un número", foreground="red")
             return
         
-        status_label.config(text="Cargando datos de {0} ({1})...".format(symbol, interval), foreground="blue")
+        status_label.config(text=f"Cargando datos de {symbol} ({interval})...", foreground="blue")
         root.update()
         
         df = obtener_datos_binance(symbol, interval, limit)
@@ -240,7 +243,7 @@ def interfaz_principal():
             status_label.config(text="Error: No se pudieron obtener datos de Binance", foreground="red")
             return
         
-        status_label.config(text=" Datos cargados: {0} registros".format(len(df)), foreground="green")
+        status_label.config(text=f"✓ Datos cargados: {len(df)} registros", foreground="green")
         mostrar_tabla_estadisticas(df, symbol, interval)
     
     buttons_frame = ttk.Frame(main_frame)

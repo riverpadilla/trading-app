@@ -1,86 +1,151 @@
-import pandas as pd
+﻿import pandas as pd
+import numpy as np
 
-def calcular_estadisticas(df):
+def calcular_deciles(valores: pd.Series) -> list:
     """
-    Calcula estadísticas segundo a segundo:
-    - Máxima y mínima variación absoluta entre apertura y cierre (con fecha, hora, apertura, cierre)
-    - Máxima y mínima diferencia absoluta entre alto y bajo (con fecha, hora, high, low)
-    - Promedio de la variación absoluta entre apertura y cierre
-    - Porcentaje de datos de variación absoluta por encima del promedio
-    - Promedio de la diferencia absoluta entre high y low
-    - Porcentaje de datos de diferencia absoluta por encima del promedio
-    Retorna un DataFrame con las estadísticas.
+    Agrupa una serie en 10 percentiles (deciles) y retorna información de cada uno.
+    
+    Devuelve lista de dicts, cada uno con:
+        'percentil': nombre del rango (ej: 'P0-10', 'P10-20', ...)
+        'rango': (valor_min, valor_max) del bin
+        'frecuencia': cantidad de elementos en el bin
+        'porcentaje': frecuencia en % respecto al total
     """
-    # Asegura que el índice sea datetime si existe columna de tiempo
-    if 'Close time' in df.columns:
-        df = df.set_index('Close time')
+    n = int(len(valores))
+    if n == 0:
+        return []
 
-    # Variaciones absolutas entre apertura y cierre
-    df['Var_Apertura_Cierre'] = (df['Close'] - df['Open']).abs()
+    serie = valores.dropna()
+    if serie.empty:
+        return []
+
+    # 10 percentiles: P0, P10, P20, ..., P100
+    percentiles = list(range(0, 101, 10))
+    pvals = np.percentile(serie.values, percentiles)
+
+    resultados = []
+    for i in range(len(pvals) - 1):
+        low = float(pvals[i])
+        high = float(pvals[i + 1])
+        # Incluir el límite inferior solo en el primer bin
+        if i == 0:
+            mask = (serie >= low) & (serie <= high)
+        else:
+            mask = (serie > low) & (serie <= high)
+        freq = int(mask.sum())
+        
+        resultados.append({
+            'percentil': f'P{i*10}-{(i+1)*10}',
+            'rango': (low, high),
+            'frecuencia': freq,
+            'porcentaje': (freq / n) * 100.0 if n > 0 else 0.0
+        })
     
-    # Máxima y mínima variación
-    idx_max_var_ac = df['Var_Apertura_Cierre'].idxmax()
-    idx_min_var_ac = df['Var_Apertura_Cierre'].idxmin()
-    max_var_ac = df.loc[idx_max_var_ac]
-    min_var_ac = df.loc[idx_min_var_ac]
+    return resultados
 
-    # Diferencias absolutas entre alto y bajo
-    df['Diff_High_Low'] = (df['High'] - df['Low']).abs()
+
+def calcular_estadisticas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula estadísticas base y agrupa variaciones y diferencias en 10 percentiles (deciles).
     
-    # Máxima y mínima diferencia
-    idx_max_diff_hl = df['Diff_High_Low'].idxmax()
-    idx_min_diff_hl = df['Diff_High_Low'].idxmin()
-    max_diff_hl = df.loc[idx_max_diff_hl]
-    min_diff_hl = df.loc[idx_min_diff_hl]
+    Devuelve un DataFrame con filas de estadísticas listas para mostrar en la UI.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame([])
 
-    # Promedios de valores absolutos
-    promedio_var_ac = df['Var_Apertura_Cierre'].mean()
-    promedio_diff_hl = df['Diff_High_Low'].mean()
+    # Usar 'Close time' como índice si existe para mostrar fecha/hora en extremos
+    work = df.copy()
+    if 'Close time' in work.columns:
+        work = work.set_index('Close time')
 
-    # Porcentajes por encima del promedio
-    porcentaje_var_ac_sobre_promedio = (df['Var_Apertura_Cierre'] > promedio_var_ac).sum() / len(df) * 100
-    porcentaje_diff_hl_sobre_promedio = (df['Diff_High_Low'] > promedio_diff_hl).sum() / len(df) * 100
+    # Métricas base
+    work['Var_Apertura_Cierre'] = (work['Close'] - work['Open']).abs()
+    work['Diff_High_Low'] = (work['High'] - work['Low']).abs()
+
+    # Extremos (manejar posibles vacíos)
+    if work['Var_Apertura_Cierre'].notna().any():
+        idx_max_var_ac = work['Var_Apertura_Cierre'].idxmax()
+        idx_min_var_ac = work['Var_Apertura_Cierre'].idxmin()
+        max_var_ac = work.loc[idx_max_var_ac]
+        min_var_ac = work.loc[idx_min_var_ac]
+    else:
+        idx_max_var_ac = idx_min_var_ac = ''
+        max_var_ac = min_var_ac = {'Var_Apertura_Cierre': 0.0, 'Open': '', 'Close': ''}
+
+    if work['Diff_High_Low'].notna().any():
+        idx_max_diff_hl = work['Diff_High_Low'].idxmax()
+        idx_min_diff_hl = work['Diff_High_Low'].idxmin()
+        max_diff_hl = work.loc[idx_max_diff_hl]
+        min_diff_hl = work.loc[idx_min_diff_hl]
+    else:
+        idx_max_diff_hl = idx_min_diff_hl = ''
+        max_diff_hl = min_diff_hl = {'Diff_High_Low': 0.0, 'High': '', 'Low': ''}
+
+    # Promedios y % sobre promedio
+    promedio_var_ac = float(work['Var_Apertura_Cierre'].mean()) if work['Var_Apertura_Cierre'].notna().any() else 0.0
+    promedio_diff_hl = float(work['Diff_High_Low'].mean()) if work['Diff_High_Low'].notna().any() else 0.0
+    porcentaje_var_ac_sobre_promedio = (work['Var_Apertura_Cierre'] > promedio_var_ac).sum() / len(work) * 100.0 if len(work) else 0.0
+    porcentaje_diff_hl_sobre_promedio = (work['Diff_High_Low'] > promedio_diff_hl).sum() / len(work) * 100.0 if len(work) else 0.0
+
+    # Calcular deciles (10 percentiles)
+    deciles_var = calcular_deciles(work['Var_Apertura_Cierre'])
+    deciles_diff = calcular_deciles(work['Diff_High_Low'])
 
     # Tabla de estadísticas
     stats = []
 
-    # Máxima variación apertura-cierre
     stats.append({
         'Estadística': 'Máxima variación absoluta (Apertura-Cierre)',
-        'Valor': max_var_ac['Var_Apertura_Cierre'],
+        'Valor': float(max_var_ac['Var_Apertura_Cierre']) if 'Var_Apertura_Cierre' in max_var_ac else 0.0,
         'Fecha/Hora': str(idx_max_var_ac),
-        'Open/High': max_var_ac['Open'],
-        'Close/Low': max_var_ac['Close']
+        'Open/High': float(max_var_ac['Open']) if 'Open' in max_var_ac else '',
+        'Close/Low': float(max_var_ac['Close']) if 'Close' in max_var_ac else ''
     })
 
-    # Mínima variación apertura-cierre
     stats.append({
         'Estadística': 'Mínima variación absoluta (Apertura-Cierre)',
-        'Valor': min_var_ac['Var_Apertura_Cierre'],
+        'Valor': float(min_var_ac['Var_Apertura_Cierre']) if 'Var_Apertura_Cierre' in min_var_ac else 0.0,
         'Fecha/Hora': str(idx_min_var_ac),
-        'Open/High': min_var_ac['Open'],
-        'Close/Low': min_var_ac['Close']
+        'Open/High': float(min_var_ac['Open']) if 'Open' in min_var_ac else '',
+        'Close/Low': float(min_var_ac['Close']) if 'Close' in min_var_ac else ''
     })
 
-    # Máxima diferencia high-low
+    # Agregar los 10 deciles de variación
+    for decil in deciles_var:
+        stats.append({
+            'Estadística': f"Variación {decil['percentil']} (Apertura-Cierre)",
+            'Valor': f"{decil['rango'][0]:.6f} – {decil['rango'][1]:.6f}",
+            'Fecha/Hora': f"{decil['frecuencia']} ocurrencias",
+            'Open/High': '',
+            'Close/Low': f"{decil['porcentaje']:.2f}%"
+        })
+
     stats.append({
         'Estadística': 'Máxima diferencia absoluta (High-Low)',
-        'Valor': max_diff_hl['Diff_High_Low'],
+        'Valor': float(max_diff_hl['Diff_High_Low']) if 'Diff_High_Low' in max_diff_hl else 0.0,
         'Fecha/Hora': str(idx_max_diff_hl),
-        'Open/High': max_diff_hl['High'],
-        'Close/Low': max_diff_hl['Low']
+        'Open/High': float(max_diff_hl['High']) if 'High' in max_diff_hl else '',
+        'Close/Low': float(max_diff_hl['Low']) if 'Low' in max_diff_hl else ''
     })
 
-    # Mínima diferencia high-low
     stats.append({
         'Estadística': 'Mínima diferencia absoluta (High-Low)',
-        'Valor': min_diff_hl['Diff_High_Low'],
+        'Valor': float(min_diff_hl['Diff_High_Low']) if 'Diff_High_Low' in min_diff_hl else 0.0,
         'Fecha/Hora': str(idx_min_diff_hl),
-        'Open/High': min_diff_hl['High'],
-        'Close/Low': min_diff_hl['Low']
+        'Open/High': float(min_diff_hl['High']) if 'High' in min_diff_hl else '',
+        'Close/Low': float(min_diff_hl['Low']) if 'Low' in min_diff_hl else ''
     })
 
-    # Promedio de variación absoluta apertura-cierre
+    # Agregar los 10 deciles de diferencia
+    for decil in deciles_diff:
+        stats.append({
+            'Estadística': f"Diferencia {decil['percentil']} (High-Low)",
+            'Valor': f"{decil['rango'][0]:.6f} – {decil['rango'][1]:.6f}",
+            'Fecha/Hora': f"{decil['frecuencia']} ocurrencias",
+            'Open/High': '',
+            'Close/Low': f"{decil['porcentaje']:.2f}%"
+        })
+
     stats.append({
         'Estadística': 'Promedio variación absoluta (Apertura-Cierre)',
         'Valor': promedio_var_ac,
@@ -89,7 +154,6 @@ def calcular_estadisticas(df):
         'Close/Low': ''
     })
 
-    # Porcentaje sobre promedio variación
     stats.append({
         'Estadística': '% datos sobre promedio variación (Apertura-Cierre)',
         'Valor': porcentaje_var_ac_sobre_promedio,
@@ -98,7 +162,6 @@ def calcular_estadisticas(df):
         'Close/Low': ''
     })
 
-    # Promedio de diferencia absoluta high-low
     stats.append({
         'Estadística': 'Promedio diferencia absoluta (High-Low)',
         'Valor': promedio_diff_hl,
@@ -107,7 +170,6 @@ def calcular_estadisticas(df):
         'Close/Low': ''
     })
 
-    # Porcentaje sobre promedio diferencia
     stats.append({
         'Estadística': '% datos sobre promedio diferencia (High-Low)',
         'Valor': porcentaje_diff_hl_sobre_promedio,
@@ -117,3 +179,4 @@ def calcular_estadisticas(df):
     })
 
     return pd.DataFrame(stats)
+
