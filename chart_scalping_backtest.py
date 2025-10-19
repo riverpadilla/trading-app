@@ -1,17 +1,22 @@
-"""Modulo generador de gráficos para scalping, usando datos de Binance y TA-Lib para indicadores técnicos.
-Configurado para intervalo de 1s y sombreado de zonas RSI extremas."""
+"""Modulo generador de gráficos para scalping, usando datos CSV y TA-Lib para indicadores técnicos.
+Configurado para análisis de datos históricos desde archivos CSV."""
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 import mplfinance as mpf
-import requests
 import pandas as pd
 import talib  # pylint: disable=no-member
+import os
 
 # --- Parámetros de la interfaz ---
 SYMBOLS = ["BNBUSDT", "USDTARS"]
 INTERVAL = "1s"  # Fijado a 1s para scalping
+
+# --- Parámetros de análisis ---
+UMBRAL_MA1 = 0.01  # Umbral para líneas de tendencia MA1 (cambiar aquí para ajustar sensibilidad)
+UMBRAL_MA2 = 0.0002   # Umbral para líneas de tendencia MA2 (cambiar aquí para ajustar sensibilidad)
+
 TIEMPO_OPTIONS = {
     "10 min": 600,   # 600 velas de 1s = 10 minutos
     "20 min": 1200,  # 1200 velas de 1s = 20 minutos  
@@ -37,75 +42,128 @@ def macd(values, fast=12, slow=26, signal=9):
     # Devuelve como pd.Series para mantener compatibilidad
     return pd.Series(macd_line, index=values.index), pd.Series(signal_line, index=values.index)
 
-""" --- Obtener datos históricos de Binance ---"""
-def obtener_historico_binance(symbol, interval, limit=600):
-    all_data = []
-    
-    # Para 1s, Binance limita a 1000 velas por llamada
-    if interval == "1s" and limit > 1000:
-        # Hacer múltiples llamadas para obtener más datos
-        calls_needed = min(4, (limit + 999) // 1000)  # Máximo 4 llamadas para evitar rate limit
-        current_end_time = None
+""" --- Variable global para archivo CSV seleccionado ---"""
+archivo_csv_seleccionado = None
+df_completo = None  # DataFrame completo cargado
+fecha_inicio_datos = None
+fecha_fin_datos = None
+total_registros = 0
+
+""" --- Cargar datos desde archivo CSV ---"""
+def cargar_datos_csv(filepath, limit=None):
+    """Carga datos desde un archivo CSV y los convierte al formato requerido"""
+    try:
+        df = pd.read_csv(filepath)
+        print(f"Columnas originales: {list(df.columns)}")
         
-        for i in range(calls_needed):
-            params = {"symbol": symbol.upper(), "interval": interval, "limit": 1000}
-            if current_end_time:
-                params["endTime"] = current_end_time
+        # Detectar y normalizar formato del CSV
+        if 'datetime' in df.columns:
+            # Formato: datetime,open,high,low,close,volume,trades_count
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            # Renombrar columnas manteniendo las originales
+            column_mapping = {
+                'datetime': 'timestamp_col',
+                'open': 'Open',
+                'high': 'High', 
+                'low': 'Low',
+                'close': 'Close',
+                'volume': 'Volume'
+            }
+            df = df.rename(columns=column_mapping)
+            # Establecer timestamp como índice
+            df.set_index('timestamp_col', inplace=True)
             
-            try:
-                response = requests.get(BINANCE_URL, params=params, timeout=10)
-                data = response.json()
-                if data and len(data) > 0:
-                    all_data.extend(data)
-                    # Usar el timestamp del primer elemento para la próxima llamada
-                    current_end_time = int(data[0][0]) - 1
-                else:
-                    break
-            except Exception as e:
-                print(f"Error en llamada {i+1}: {e}")
-                break
+        elif 'Open time' in df.columns and 'Close time' in df.columns:
+            # Formato Binance completo
+            df['Open time'] = pd.to_datetime(df['Open time'], unit='ms')
+            df['Close time'] = pd.to_datetime(df['Close time'], unit='ms')
+            # Usar Close time como índice y eliminar de columnas
+            df.set_index('Close time', inplace=True)
+            # Eliminar Open time si existe como columna (para evitar conflictos)
+            if 'Open time' in df.columns:
+                df = df.drop('Open time', axis=1)
+                
+        else:
+            # Intentar detectar columnas por posición
+            expected_cols = ['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']
+            if len(df.columns) >= 6:
+                # Renombrar todas las columnas
+                new_columns = expected_cols + [f'col_{i}' for i in range(6, len(df.columns))]
+                df.columns = new_columns
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df.set_index('timestamp', inplace=True)
         
-        # Remover duplicados y ordenar
-        seen = set()
-        unique_data = []
-        for item in all_data:
-            if item[0] not in seen:
-                seen.add(item[0])
-                unique_data.append(item)
+        # Asegurar tipos de datos correctos
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # Ordenar por timestamp y tomar los últimos 'limit' elementos
-        unique_data.sort(key=lambda x: x[0])
-        data = unique_data[-limit:] if len(unique_data) > limit else unique_data
+        # Ordenar por timestamp y aplicar límite si se especifica
+        df.sort_index(inplace=True)
+        if limit and len(df) > limit:
+            df = df.tail(limit)
+        
+        # Agregar columnas requeridas por la aplicación original
+        # (no crear Open time ni Close time como columnas, solo usar el índice)
+        required_columns = ["Quote asset volume", "Number of trades", 
+                          "Taker buy base asset volume", "Taker buy quote asset volume", "Ignore"]
+        for col in required_columns:
+            if col not in df.columns:
+                df[col] = 0
+        
+        # Crear un DataFrame compatible con el formato original de Binance
+        # El código original espera que el índice sea "Close time"
+        df_compatible = df.copy()
+        
+        # Asegurar que el nombre del índice sea "Close time" para compatibilidad
+        df_compatible.index.name = "Close time"
+        
+        # Crear las columnas que el código original necesita como datos (no como índice)
+        df_compatible.reset_index(inplace=True)  # El índice se convierte en columna "Close time"
+        df_compatible["Open time"] = df_compatible["Close time"]  # Crear Open time igual a Close time
+        df_compatible.set_index("Close time", inplace=True)  # Volver a poner Close time como índice
+        
+        print(f"Datos procesados: {len(df_compatible)} registros desde {df_compatible.index[0]} hasta {df_compatible.index[-1]}")
+        print(f"Columnas finales: {list(df_compatible.columns)}")
+        print(f"Índice: {df_compatible.index.name}")
+        
+        # Si no se especifica límite, almacenar el DataFrame completo
+        if limit is None:
+            global df_completo, fecha_inicio_datos, fecha_fin_datos, total_registros
+            df_completo = df_compatible.copy()
+            fecha_inicio_datos = df_compatible.index[0]
+            fecha_fin_datos = df_compatible.index[-1]
+            total_registros = len(df_compatible)
+            
+            # Actualizar la información en la interfaz
+            actualizar_info_datos()
+        
+        return df_compatible
+        
+    except Exception as e:
+        print(f"Error detallado: {e}")
+        raise Exception(f"Error al cargar archivo CSV: {e}")
+
+""" --- Obtener datos (ahora desde CSV) ---"""
+def obtener_historico_binance(symbol, interval, limit=600):
+    """Función adaptada para cargar datos desde CSV manteniendo compatibilidad"""
+    global archivo_csv_seleccionado, df_completo
+    
+    if archivo_csv_seleccionado and os.path.exists(archivo_csv_seleccionado):
+        # Si es la primera carga, cargar todo el archivo
+        if df_completo is None:
+            return cargar_datos_csv(archivo_csv_seleccionado, limit=None)
+        else:
+            # Si ya tenemos datos cargados, usar la función de posición
+            df_subset = obtener_datos_por_posicion()
+            if df_subset is not None and len(df_subset) > 0:
+                return df_subset
+            else:
+                # Fallback a los últimos datos disponibles
+                return cargar_datos_csv(archivo_csv_seleccionado, limit)
     else:
-        # Llamada única para otros intervalos o límites pequeños
-        params = {"symbol": symbol.upper(), "interval": interval, "limit": min(limit, 1000)}
-        response = requests.get(BINANCE_URL, params=params, timeout=10)
-        data = response.json()
-    
-    df = pd.DataFrame(
-        data,
-        columns=[
-            "Open time", "Open", "High", "Low", "Close", "Volume",
-            "Close time", "Quote asset volume", "Number of trades",
-            "Taker buy base asset volume", "Taker buy quote asset volume", "Ignore"
-        ]
-    )
-    df["Open time"] = pd.to_datetime(df["Open time"], unit="ms")
-    df["Close time"] = pd.to_datetime(df["Close time"], unit="ms")
-    
-    # Ajustar zona horaria a UTC-5 (Colombia) - Restar 5 horas directamente
-    df["Open time"] = df["Open time"] - pd.Timedelta(hours=5)
-    df["Close time"] = df["Close time"] - pd.Timedelta(hours=5)
-    
-    df["Open"] = df["Open"].astype(float)
-    df["High"] = df["High"].astype(float)
-    df["Low"] = df["Low"].astype(float)
-    df["Close"] = df["Close"].astype(float)
-    df["Volume"] = df["Volume"].astype(float)
-    df.set_index("Close time", inplace=True)
-    
-    print(f"Obtenidos {len(df)} registros de datos")  # Debug info
-    return df
+        # Si no hay archivo seleccionado, mostrar mensaje
+        raise Exception("No hay archivo CSV seleccionado. Por favor selecciona un archivo primero.")
 
 """ --- Procesar indicadores y señales ---"""
 def procesar_indicadores(df):
@@ -121,131 +179,14 @@ def procesar_indicadores(df):
 
 
 
-""" --- Función para calcular líneas de tendencia de MA para addplot ---"""
-def calcular_lineas_tendencia_ma_individual_addplot(df, periodo_ma, umbral_pendiente, es_segunda_ma=False):
-    """Calcula líneas de tendencia de una MA específica y retorna datos para addplot"""
-    import numpy as np
-    
-    # Verificar si se deben mostrar las líneas de tendencia (con verificación de None)
-    if es_segunda_ma and mostrar_lineas_tendencia_ma2 and not mostrar_lineas_tendencia_ma2.get():
-        return []
-    elif not es_segunda_ma and mostrar_lineas_tendencia_ma1 and not mostrar_lineas_tendencia_ma1.get():
-        return []
-    
-    ma_values = df[periodo_ma].dropna()
-    
-    if len(ma_values) < 10:  # Necesitamos suficientes datos
-        return []
-    
-    # Calcular pendientes móviles para detectar cambios
-    ventana = 3  # Ventana más pequeña para mayor sensibilidad
-    pendientes_locales = []
-    indices_validos = []
-    
-    for i in range(ventana, len(ma_values) - ventana):
-        # Calcular pendiente en una ventana pequeña alrededor del punto
-        inicio_idx = i - ventana // 2
-        fin_idx = i + ventana // 2
-        
-        x_vals = np.arange(inicio_idx, fin_idx + 1)
-        y_vals = ma_values.iloc[inicio_idx:fin_idx + 1].values
-        
-        if len(y_vals) > 1:
-            pendiente_local = np.polyfit(x_vals, y_vals, 1)[0]
-            pendientes_locales.append(pendiente_local)
-            indices_validos.append(i)
-    
-    if not pendientes_locales:
-        return []
-    
-    # Detectar cambios significativos de pendiente
-    segmentos_tendencia = []
-    inicio_segmento = 0
-    pendiente_anterior = pendientes_locales[0]
-    
-    threshold_cambio = 0.00005  # Umbral para detectar cambios de pendiente
-    min_longitud = 5  # Longitud mínima del segmento
-    
-    for i in range(1, len(pendientes_locales)):
-        pendiente_actual = pendientes_locales[i]
-        cambio_pendiente = abs(pendiente_actual - pendiente_anterior)
-        
-        # Si hay un cambio significativo o llegamos al final
-        if cambio_pendiente > threshold_cambio or i == len(pendientes_locales) - 1:
-            fin_segmento = i - 1 if i < len(pendientes_locales) - 1 else i
-            
-            # Verificar longitud mínima del segmento
-            if fin_segmento - inicio_segmento >= min_longitud:
-                inicio_idx = indices_validos[inicio_segmento]
-                fin_idx = indices_validos[fin_segmento]
-                
-                inicio_timestamp = ma_values.index[inicio_idx]
-                fin_timestamp = ma_values.index[fin_idx]
-                inicio_valor = ma_values.iloc[inicio_idx]
-                fin_valor = ma_values.iloc[fin_idx]
-                
-                # Calcular pendiente promedio del segmento
-                pendiente_segmento = np.mean(pendientes_locales[inicio_segmento:fin_segmento + 1])
-                
-                segmentos_tendencia.append({
-                    'inicio_timestamp': inicio_timestamp,
-                    'fin_timestamp': fin_timestamp,
-                    'inicio_valor': inicio_valor,
-                    'fin_valor': fin_valor,
-                    'pendiente': pendiente_segmento,
-                    'longitud': fin_idx - inicio_idx + 1
-                })
-            
-            inicio_segmento = i
-            pendiente_anterior = pendiente_actual
-    
-    # Preparar datos para addplot basados en el umbral
-    lineas_addplot = []
-    
-    for segmento in segmentos_tendencia:
-        # Determinar color según la pendiente usando umbral dinámico
-        if segmento['pendiente'] > umbral_pendiente:  # Pendiente alcista significativa
-            color_tendencia = 'lime'
-        elif segmento['pendiente'] < -umbral_pendiente:  # Pendiente bajista significativa
-            color_tendencia = 'red'
-        else:  # Pendiente lateral/neutral
-            color_tendencia = 'yellow'
-        
-        # Crear serie para la línea de tendencia
-        line_data = pd.Series(index=df.index, dtype=float)
-        
-        # Encontrar índices en el DataFrame original
-        mask = (df.index >= segmento['inicio_timestamp']) & (df.index <= segmento['fin_timestamp'])
-        indices_segmento = df.index[mask]
-        
-        if len(indices_segmento) >= 2:
-            # Crear línea recta entre puntos
-            inicio_val = segmento['inicio_valor']
-            fin_val = segmento['fin_valor']
-            
-            # Interpolar valores para toda la línea
-            for i, timestamp in enumerate(indices_segmento):
-                ratio = i / (len(indices_segmento) - 1) if len(indices_segmento) > 1 else 0
-                line_data[timestamp] = inicio_val + (fin_val - inicio_val) * ratio
-        
-        # Usar diferente estilo para la segunda MA
-        line_width = 1.0 if es_segunda_ma else 1.5
-        alpha = 0.7 if es_segunda_ma else 0.9
-        
-        lineas_addplot.append({
-            'data': line_data,
-            'color': color_tendencia,
-            'width': line_width,
-            'alpha': alpha
-        })
-    
-    return lineas_addplot
-
-""" --- Función original mantenida para compatibilidad ---"""
+""" --- Función para calcular y mostrar líneas de tendencia de MA basadas en cambios de pendiente ---"""
 def calcular_lineas_tendencia_ma_individual(axes, df, periodo_ma, es_segunda_ma=False):
-    """Calcula y muestra líneas de tendencia de una MA específica basadas en cambios significativos de pendiente"""
+    """Calcula y muestra líneas de tendencia de una MA específica basadas en cambios significativos de pendiente con umbrales independientes"""
     import matplotlib.dates as mdates
     import numpy as np
+    
+    # Seleccionar umbral específico según qué MA se está procesando
+    umbral_actual = UMBRAL_MA2 if es_segunda_ma else UMBRAL_MA1
     
     # Verificar si se deben mostrar las líneas de tendencia
     if es_segunda_ma and not mostrar_lineas_tendencia_ma2.get():
@@ -332,10 +273,10 @@ def calcular_lineas_tendencia_ma_individual(axes, df, periodo_ma, es_segunda_ma=
                     'longitud': fin_idx - inicio_idx + 1
                 })
     
-    # Dibujar las líneas de tendencia
+    # Dibujar las líneas de tendencia usando el umbral específico de esta MA
     for i, segmento in enumerate(segmentos_tendencia):
-        # Determinar color según la pendiente usando umbral fijo
-        umbral_actual = 0.0002  # Umbral fijo
+        # Determinar color según la pendiente usando umbral específico
+        # umbral_actual ya se definió al inicio de la función
         if segmento['pendiente'] > umbral_actual:  # Pendiente alcista significativa
             color_tendencia = 'lime'
         elif segmento['pendiente'] < -umbral_actual:  # Pendiente bajista significativa
@@ -381,31 +322,23 @@ def calcular_lineas_tendencia_ma(axes, df):
     
     return segmentos_ma1, segmentos_ma2
 
-""" --- Función helper para obtener umbral dinámico ---"""
-def obtener_umbral_dinamico():
-    """Retorna el umbral dinámico o un valor por defecto"""
-    try:
-        return umbral_pendiente.get() if umbral_pendiente else 0.0002
-    except:
-        return 0.0002
-
 """ --- Función para detectar convergencias entre MAs (sin RSI) ---"""
 def marcar_convergencias_doble_ma_rsi(axes, df, segmentos_ma1, segmentos_ma2):
-    """Detecta y marca convergencias específicas entre tendencias de las dos MAs"""
+    """Detecta y marca convergencias específicas entre tendencias de las dos MAs con persistencia"""
     import matplotlib.dates as mdates
-    import numpy as np
+    global convergencias_persistentes
     
     # Verificar que al menos tenemos una MA y RSI, y que ambas MAs estén habilitadas
     if not (mostrar_ma.get() and mostrar_ma2.get()) or not segmentos_ma1 or not segmentos_ma2:
-        return []
+        return convergencias_persistentes  # Devolver las existentes si no hay condiciones
     
     convergencias_detectadas = []
     
     # Función para obtener la tendencia en un timestamp específico
-    def obtener_tendencia_en_timestamp(segmentos, timestamp):
+    def obtener_tendencia_en_timestamp(segmentos, timestamp, es_ma2=False):
         for segmento in segmentos:
             if segmento['inicio_timestamp'] <= timestamp <= segmento['fin_timestamp']:
-                umbral_actual = obtener_umbral_dinamico()  # Umbral dinámico
+                umbral_actual = UMBRAL_MA2 if es_ma2 else UMBRAL_MA1  # Usar umbral específico
                 if segmento['pendiente'] > umbral_actual:
                     return 'alcista'
                 elif segmento['pendiente'] < -umbral_actual:
@@ -417,12 +350,12 @@ def marcar_convergencias_doble_ma_rsi(axes, df, segmentos_ma1, segmentos_ma2):
     # Función para detectar cambios de dirección en MA2
     def detectar_cambios_direccion_ma2():
         cambios = []
-        umbral_actual = obtener_umbral_dinamico()  # Umbral dinámico
+        umbral_actual = UMBRAL_MA2  # Usar umbral específico para MA2
         for i in range(1, len(segmentos_ma2)):
             segmento_anterior = segmentos_ma2[i-1]
             segmento_actual = segmentos_ma2[i]
             
-            # Clasificar tendencias usando umbral fijo
+            # Clasificar tendencias usando umbral específico de MA2
             tend_anterior = 'alcista' if segmento_anterior['pendiente'] > umbral_actual else ('bajista' if segmento_anterior['pendiente'] < -umbral_actual else 'lateral')
             tend_actual = 'alcista' if segmento_actual['pendiente'] > umbral_actual else ('bajista' if segmento_actual['pendiente'] < -umbral_actual else 'lateral')
             
@@ -453,8 +386,8 @@ def marcar_convergencias_doble_ma_rsi(axes, df, segmentos_ma1, segmentos_ma2):
             rsi_valor = df.loc[timestamp_cercano, 'RSI']
             timestamp = timestamp_cercano
         
-        # Obtener tendencia de MA1 en ese momento
-        tendencia_ma1 = obtener_tendencia_en_timestamp(segmentos_ma1, timestamp)
+        # Obtener tendencia de MA1 en ese momento (usar umbral específico MA1)
+        tendencia_ma1 = obtener_tendencia_en_timestamp(segmentos_ma1, timestamp, es_ma2=False)
         
         # CONDICIÓN 1: MA1 bajista + MA2 cambia a bajista (sin RSI)
         if (tendencia_ma1 == 'bajista' and 
@@ -466,7 +399,7 @@ def marcar_convergencias_doble_ma_rsi(axes, df, segmentos_ma1, segmentos_ma2):
                 'rsi': rsi_valor,
                 'ma1_tendencia': tendencia_ma1,
                 'ma2_cambio': cambio['direccion_nueva'],
-                'descripcion': f'MA1↘ + MA2→↘'
+                'descripcion': 'MA1↘ + MA2→↘'
             })
         
         # CONDICIÓN 2: MA1 alcista + MA2 cambia a alcista (sin RSI)
@@ -479,7 +412,7 @@ def marcar_convergencias_doble_ma_rsi(axes, df, segmentos_ma1, segmentos_ma2):
                 'rsi': rsi_valor,
                 'ma1_tendencia': tendencia_ma1,
                 'ma2_cambio': cambio['direccion_nueva'],
-                'descripcion': f'MA1↗ + MA2→↗'
+                'descripcion': 'MA1↗ + MA2→↗'
             })
     
     # Análisis de pendientes para debugging
@@ -501,27 +434,53 @@ def marcar_convergencias_doble_ma_rsi(axes, df, segmentos_ma1, segmentos_ma2):
         if todas_pendientes:
             print(f"GLOBAL - Min: {min(todas_pendientes):.6f}, Max: {max(todas_pendientes):.6f}")
             
-            # Contar clasificaciones con umbral dinámico
-            umbral_actual = obtener_umbral_dinamico()  # Umbral dinámico
-            alcistas = sum(1 for p in todas_pendientes if p > umbral_actual)
-            bajistas = sum(1 for p in todas_pendientes if p < -umbral_actual)
-            laterales = sum(1 for p in todas_pendientes if -umbral_actual <= p <= umbral_actual)
+            # Contar clasificaciones usando umbrales promedio para estadísticas generales
+            umbral_promedio = (UMBRAL_MA1 + UMBRAL_MA2) / 2
+            alcistas = sum(1 for p in todas_pendientes if p > umbral_promedio)
+            bajistas = sum(1 for p in todas_pendientes if p < -umbral_promedio)
+            laterales = sum(1 for p in todas_pendientes if -umbral_promedio <= p <= umbral_promedio)
             
-            print(f"Clasificación actual (umbral ±{umbral_actual:.6f}):")
+            print(f"Clasificación actual (MA1: ±{UMBRAL_MA1:.6f}, MA2: ±{UMBRAL_MA2:.6f}):")
             print(f"  [+] Alcistas: {alcistas} ({alcistas/len(todas_pendientes)*100:.1f}%)")
             print(f"  [-] Bajistas: {bajistas} ({bajistas/len(todas_pendientes)*100:.1f}%)")
             print(f"  ⚪ Laterales: {laterales} ({laterales/len(todas_pendientes)*100:.1f}%)")
     
-    # Filtrar señales consecutivas del mismo tipo
-    convergencias_filtradas = []
-    ultima_senal_tipo = None
+    # Sistema de convergencias persistentes con filtro de señales consecutivas
     
+    # Agregar nuevas convergencias a la lista persistente (evitar duplicados)
     for conv in convergencias_detectadas:
-        # Solo agregar si es diferente al tipo anterior
-        if conv['tipo'] != ultima_senal_tipo:
+        # Verificar si ya existe una convergencia muy cercana en tiempo (dentro de 5 segundos)
+        es_nueva = True
+        for conv_existente in convergencias_persistentes:
+            tiempo_diff = abs((conv['timestamp'] - conv_existente['timestamp']).total_seconds())
+            if tiempo_diff < 5 and conv['tipo'] == conv_existente['tipo']:
+                es_nueva = False
+                break
+        
+        # Solo agregar si es realmente nueva
+        if es_nueva:
+            convergencias_persistentes.append(conv)
+    
+    # Limpiar convergencias muy antiguas (más de 30 minutos)
+    tiempo_actual = df.index[-1]
+    convergencias_persistentes[:] = [
+        conv for conv in convergencias_persistentes 
+        if (tiempo_actual - conv['timestamp']).total_seconds() < 1800  # 30 minutos
+    ]
+    
+    # FILTRADO DE SEÑALES CONSECUTIVAS DEL MISMO TIPO
+    # Ordenar convergencias por tiempo para aplicar filtro correctamente
+    convergencias_ordenadas = sorted(convergencias_persistentes, key=lambda x: x['timestamp'])
+    
+    convergencias_filtradas = []
+    ultimo_tipo = None
+    
+    for conv in convergencias_ordenadas:
+        # Solo agregar si es diferente al tipo anterior (filtro de consecutivas)
+        if conv['tipo'] != ultimo_tipo:
             convergencias_filtradas.append(conv)
-            ultima_senal_tipo = conv['tipo']
-        # Si es del mismo tipo que la anterior, se omite
+            ultimo_tipo = conv['tipo']
+        # Si es del mismo tipo que la anterior, se omite (filtrado)
     
     # Dibujar las convergencias filtradas
     for conv in convergencias_filtradas:
@@ -704,7 +663,7 @@ def marcar_convergencias_rsi_macd(axes, df):
         linestyle = '--' if conv['cruce_macd'] == 'alcista' else ':'
         
         # Líneas verticales en los 3 paneles
-        for i, ax in enumerate(axes):
+        for ax in axes:
             ax.axvline(x=date, color=color, linestyle=linestyle, linewidth=1.5, alpha=0.8)
         
         # Etiquetas específicas en cada panel
@@ -734,117 +693,9 @@ def marcar_convergencias_rsi_macd(axes, df):
     
     return len(convergencias)
 
-""" --- Función para señales de trading combinadas RSI + MACD + MA ---"""
-def marcar_senales_trading_combinadas(axes, df):
-    """Detecta señales de compra/venta combinando RSI extremo + MACD cruce + condición de MA"""
-    import matplotlib.dates as mdates
-    
-    if not mostrar_senales_combinadas.get() or not mostrar_ma.get():
-        return 0
-    
-    # Obtener la MA seleccionada
-    periodo_seleccionado = ma_periodo.get()
-    
-    senales = []
-    
-    # Detectar cruces entre MACD y línea de señal
-    macd_prev = df['MACD'].shift(1)
-    signal_prev = df['Signal'].shift(1)
-    
-    # Cruce alcista: MACD cruza SOBRE la línea de señal
-    cruces_alcistas = (macd_prev < signal_prev) & (df['MACD'] >= df['Signal'])
-    
-    # Cruce bajista: MACD cruza DEBAJO de la línea de señal
-    cruces_bajistas = (macd_prev > signal_prev) & (df['MACD'] <= df['Signal'])
-    
-    # Combinar todos los cruces
-    cruces_macd = cruces_alcistas | cruces_bajistas
-    
-    # Para cada cruce, verificar condiciones combinadas
-    for idx in df[cruces_macd].index:
-        rsi_valor = df.loc[idx, 'RSI']
-        macd_valor = df.loc[idx, 'MACD']
-        signal_valor = df.loc[idx, 'Signal']
-        close_valor = df.loc[idx, 'Close']
-        ma_valor = df.loc[idx, periodo_seleccionado]
-        
-        # Determinar tipo de cruce
-        es_cruce_alcista = cruces_alcistas[idx] if idx in cruces_alcistas.index else False
-        
-        # SEÑAL DE COMPRA: RSI < 30 (sobreventa) + MACD cruce alcista + Precio > MA
-        if (rsi_valor < 30 and es_cruce_alcista and close_valor > ma_valor):
-            senales.append({
-                'timestamp': idx,
-                'tipo': 'COMPRA',
-                'rsi': rsi_valor,
-                'macd': macd_valor,
-                'signal': signal_valor,
-                'close': close_valor,
-                'ma': ma_valor,
-                'ma_periodo': periodo_seleccionado,
-                'condiciones': f'RSI:{rsi_valor:.1f}<30, MACD↗, Precio>${close_valor:.4f}>${ma_valor:.4f}'
-            })
-        
-        # SEÑAL DE VENTA: RSI > 70 (sobrecompra) + MACD cruce bajista + Precio < MA
-        elif (rsi_valor > 70 and not es_cruce_alcista and close_valor < ma_valor):
-            senales.append({
-                'timestamp': idx,
-                'tipo': 'VENTA',
-                'rsi': rsi_valor,
-                'macd': macd_valor,
-                'signal': signal_valor,
-                'close': close_valor,
-                'ma': ma_valor,
-                'ma_periodo': periodo_seleccionado,
-                'condiciones': f'RSI:{rsi_valor:.1f}>70, MACD↘, Precio${close_valor:.4f}<${ma_valor:.4f}'
-            })
-    
-    # Marcar las señales en el gráfico
-    for senal in senales:
-        date = mdates.date2num(senal['timestamp'])
-        
-        # Colores y símbolos según tipo de señal
-        if senal['tipo'] == 'COMPRA':
-            color = 'lime'
-            simbolo = 'BUY'
-            flecha = '^'
-            offset_y = 30
-        else:  # VENTA
-            color = 'red'
-            simbolo = 'SELL'
-            flecha = 'v'
-            offset_y = -40
-        
-        # Líneas verticales en los 3 paneles con mayor grosor para señales importantes
-        for ax in axes:
-            ax.axvline(x=date, color=color, linestyle='-', linewidth=2.5, alpha=0.9)
-        
-        # Panel 0 (Velas): Señal principal con precio y tipo
-        axes[0].annotate(f'{simbolo} {senal["tipo"]} {flecha}\n${senal["close"]:.4f}', 
-                        xy=(date, senal['close']),
-                        xytext=(15, offset_y), textcoords='offset points',
-                        bbox=dict(boxstyle='round,pad=0.5', facecolor=color, alpha=0.9, edgecolor='white', linewidth=2),
-                        fontsize=10, color='white', weight='bold', ha='center')
-        
-        # Panel 1 (RSI): Condición RSI
-        axes[1].annotate(f'{senal["tipo"]}\nRSI:{senal["rsi"]:.1f}', 
-                        xy=(date, senal['rsi']),
-                        xytext=(15, 20 if senal['tipo'] == 'COMPRA' else -30), textcoords='offset points',
-                        bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.8),
-                        fontsize=9, color='white', weight='bold', ha='center')
-        
-        # Panel 2 (MACD): Condición MACD
-        diferencia = senal['macd'] - senal['signal']
-        axes[2].annotate(f'{senal["tipo"]}\nMACD{flecha}', 
-                        xy=(date, senal['macd']),
-                        xytext=(15, 25 if senal['macd'] > 0 else -35), textcoords='offset points',
-                        bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.8),
-                        fontsize=9, color='white', weight='bold', ha='center')
-    
-    return len(senales)
-
 # Variables globales para tracking de convergencias
 convergencias_ma_rsi_global = []
+convergencias_persistentes = []  # Lista acumulativa de convergencias
 
 def obtener_titulo_panel():
     """Genera el título dinámico del panel basado en las opciones seleccionadas"""
@@ -857,12 +708,10 @@ def obtener_titulo_panel():
         adicionales.append("Tendencias MA")
     if mostrar_convergencias_rsi_macd.get():
         adicionales.append("RSI+MACD Cruces")
-    if mostrar_senales_combinadas.get():
-        adicionales.append("Señales Trading")
     
     # Agregar información sobre convergencias MA
     if mostrar_convergencias_ma_rsi.get() and convergencias_ma_rsi_global:
-        adicionales.append(f"CONV: {len(convergencias_ma_rsi_global)} MA")
+        adicionales.append(f"{len(convergencias_ma_rsi_global)} Conv MA")
     
     if adicionales:
         titulo_base += f" ({' + '.join(adicionales)})"
@@ -891,39 +740,39 @@ def mostrar_valores_actuales(df):
     vertical_margin = 0.06  # Entre cada valor
     boxstyle = 'round,pad=0.3,rounding_size=0.2'  # Estilo uniforme
 
-    # Panel 0: Velas y precio
+    # Panel 0: Velas y precio (movido a la derecha)
     axes[0].text(
-        0.01, top_margins[0], f"Precio: {ultimo['Close']:.4f}".ljust(18),
+        0.99, top_margins[0], f"Precio: {ultimo['Close']:.4f}".ljust(18),
         transform=axes[0].transAxes,
-        fontsize=11, color=color_vela, ha='left', va='top',
+        fontsize=11, color=color_vela, ha='right', va='top',
         bbox=dict(facecolor='none', edgecolor=color_vela, boxstyle=boxstyle, linewidth=1)
     )
-    # Mostrar valor de MA solo si está activada
+    # Mostrar valor de MA solo si está activada (movido a la derecha)
     if mostrar_ma.get():
         periodo_seleccionado = ma_periodo.get()
         colores_ma = {"MA3": "magenta", "MA7": "red", "MA14": "cyan", "MA25": "orange", "MA50": "purple", "MA99": "blue"}
         color_ma = colores_ma.get(periodo_seleccionado, "purple")
         axes[0].text(
-            0.01, top_margins[0] - vertical_margin, f"{periodo_seleccionado}: {ultimo[periodo_seleccionado]:.4f}".ljust(18),
+            0.99, top_margins[0] - vertical_margin, f"{periodo_seleccionado}: {ultimo[periodo_seleccionado]:.4f}".ljust(18),
             transform=axes[0].transAxes,
-            fontsize=11, color=color_ma, ha='left', va='top',
+            fontsize=11, color=color_ma, ha='right', va='top',
             bbox=dict(facecolor='none', edgecolor=color_ma, boxstyle=boxstyle, linewidth=1)
         )
     
-    # Mostrar valor de segunda MA solo si está activada
+    # Mostrar valor de segunda MA solo si está activada (movido a la derecha)
     if mostrar_ma2.get():
         periodo_seleccionado2 = ma2_periodo.get()
         colores_ma2 = {"MA3": "lightcoral", "MA7": "lightblue", "MA14": "lightyellow", "MA25": "lightgreen", "MA50": "lightpink", "MA99": "lightgray"}
         color_ma2 = colores_ma2.get(periodo_seleccionado2, "lightgray")
         offset_adicional = vertical_margin if mostrar_ma.get() else 0  # Ajustar posición según primera MA
         axes[0].text(
-            0.01, top_margins[0] - vertical_margin - offset_adicional, f"{periodo_seleccionado2}: {ultimo[periodo_seleccionado2]:.4f}".ljust(18),
+            0.99, top_margins[0] - vertical_margin - offset_adicional, f"{periodo_seleccionado2}: {ultimo[periodo_seleccionado2]:.4f}".ljust(18),
             transform=axes[0].transAxes,
-            fontsize=11, color=color_ma2, ha='left', va='top',
+            fontsize=11, color=color_ma2, ha='right', va='top',
             bbox=dict(facecolor='none', edgecolor=color_ma2, boxstyle=boxstyle, linewidth=1)
         )
     
-    # Panel 1: RSI
+    # Panel 1: RSI (mantiene posición izquierda para balance visual)
     axes[1].text(
         0.01, top_margins[1], f"RSI: {ultimo['RSI']:.2f} ({zona_rsi})".ljust(20),
         transform=axes[1].transAxes,
@@ -931,33 +780,37 @@ def mostrar_valores_actuales(df):
         bbox=dict(facecolor='none', edgecolor=color_rsi, boxstyle=boxstyle, linewidth=1)
     )
     
-    # Panel 2: MACD
+    # Panel 2: MACD (movido a la derecha)
     macd_delta = ultimo['MACD'] - ultimo['Signal']
     axes[2].text(
-        0.01, top_margins[2], f"MACD: {ultimo['MACD']:.4f}".ljust(18),
+        0.99, top_margins[2], f"MACD: {ultimo['MACD']:.4f}".ljust(18),
         transform=axes[2].transAxes,
-        fontsize=11, color='white', ha='left', va='top',
+        fontsize=11, color='white', ha='right', va='top',
         bbox=dict(facecolor='none', edgecolor='white', boxstyle=boxstyle, linewidth=1)
     )
     axes[2].text(
-        0.01, top_margins[2] - vertical_margin, f"Signal: {ultimo['Signal']:.4f}".ljust(18),
+        0.99, top_margins[2] - vertical_margin, f"Signal: {ultimo['Signal']:.4f}".ljust(18),
         transform=axes[2].transAxes,
-        fontsize=11, color='orange', ha='left', va='top',
+        fontsize=11, color='orange', ha='right', va='top',
         bbox=dict(facecolor='none', edgecolor='orange', boxstyle=boxstyle, linewidth=1)
     )
     axes[2].text(
-        0.01, top_margins[2] - 2*vertical_margin, f"Delta: {macd_delta:.4f}".ljust(18),
+        0.99, top_margins[2] - 2*vertical_margin, f"Delta: {macd_delta:.4f}".ljust(18),
         transform=axes[2].transAxes,
-        fontsize=11, color='green' if macd_delta >= 0 else 'red', ha='left', va='top',
+        fontsize=11, color='green' if macd_delta >= 0 else 'red', ha='right', va='top',
         bbox=dict(facecolor='none', edgecolor='gray', boxstyle=boxstyle, linewidth=1)
     )
 
 """ --- Funciones de la interfaz gráfica ---"""
 def cargar_datos():
-    global mostrar_ma, ma_periodo, mostrar_senales_combinadas
-    symbol = symbol_var.get()
+    global mostrar_ma, ma_periodo, archivo_csv_seleccionado
+    
+    if not archivo_csv_seleccionado:
+        messagebox.showerror("Error", "Por favor selecciona un archivo CSV primero")
+        return
+        
     try:
-        df = obtener_historico_binance(symbol, INTERVAL)
+        df = obtener_historico_binance("CSV_DATA", INTERVAL)
         df = procesar_indicadores(df)
         
         for widget in frame_chart.winfo_children():
@@ -980,23 +833,6 @@ def cargar_datos():
             color_ma2 = colores_ma2.get(periodo_seleccionado2, "lightgray")
             addplots.append(mpf.make_addplot(df[periodo_seleccionado2], color=color_ma2, panel=0, width=1.5, secondary_y=False, label=periodo_seleccionado2, alpha=0.7))
         
-        # Agregar líneas de tendencia dinámicas
-        umbral_actual = umbral_pendiente.get() if umbral_pendiente else 0.0002
-        
-        # Líneas de tendencia MA1
-        if mostrar_ma.get():
-            lineas_ma1 = calcular_lineas_tendencia_ma_individual_addplot(df, ma_periodo.get(), umbral_actual, False)
-            for linea in lineas_ma1:
-                addplots.append(mpf.make_addplot(linea['data'], color=linea['color'], panel=0, 
-                                               width=linea['width'], alpha=linea['alpha'], secondary_y=False))
-        
-        # Líneas de tendencia MA2  
-        if mostrar_ma2.get():
-            lineas_ma2 = calcular_lineas_tendencia_ma_individual_addplot(df, ma2_periodo.get(), umbral_actual, True)
-            for linea in lineas_ma2:
-                addplots.append(mpf.make_addplot(linea['data'], color=linea['color'], panel=0, 
-                                               width=linea['width'], alpha=linea['alpha'], secondary_y=False))
-        
         # Agregar indicadores RSI y MACD
         addplots.extend([
             mpf.make_addplot(df['RSI'], color='blue', panel=1, ylabel='RSI', label='RSI'),
@@ -1014,7 +850,7 @@ def cargar_datos():
             panel_ratios=(2,1,1),
             ylabel='Precio',
             ylabel_lower='Volumen',
-            title=f'{symbol} - Scalping Analysis (1s) UTC-5',
+            title=f'CSV Data - Scalping Analysis | MA1: {UMBRAL_MA1}, MA2: {UMBRAL_MA2}',
             datetime_format='%m/%d %H:%M:%S',
             xrotation=15,
             warn_too_much_data=10000,
@@ -1055,14 +891,17 @@ def inicializar_grafico():
 
 """ --- Actualización periódica del gráfico ---"""
 def actualizar_grafico():
-    global actualizando, axes, mostrar_ma, ma_periodo, mostrar_senales_combinadas
+    global actualizando, axes, mostrar_ma, ma_periodo, archivo_csv_seleccionado
     if actualizando:
-        symbol = symbol_var.get()
+        if not archivo_csv_seleccionado:
+            root.after(1000, actualizar_grafico)  # Intentar de nuevo en 1 segundo
+            return
+            
         tiempo_seleccionado = tiempo_var.get()
         limit = TIEMPO_OPTIONS[tiempo_seleccionado]
         try:
             plt.style.use('dark_background')  # Fondo oscuro también al actualizar
-            df = obtener_historico_binance(symbol, INTERVAL, limit)
+            df = obtener_historico_binance("CSV_DATA", INTERVAL, limit)
             df = procesar_indicadores(df)
             
             for ax in axes:
@@ -1119,14 +958,14 @@ def actualizar_grafico():
             # Calcular y mostrar líneas de tendencia de MA basadas en cambios de pendiente
             segmentos_ma1, segmentos_ma2 = calcular_lineas_tendencia_ma(axes, df)
             
-            # CONV: NUEVA FUNCIONALIDAD: Marcar convergencias entre MAs (sin RSI)
+            # NUEVA FUNCIONALIDAD: Marcar convergencias entre MAs (sin RSI)
             global convergencias_ma_rsi_global
             if mostrar_convergencias_ma_rsi.get():
                 convergencias_ma_rsi_global = marcar_convergencias_doble_ma_rsi(axes, df, segmentos_ma1, segmentos_ma2)
                 
                 # Imprimir convergencias detectadas para feedback
                 if convergencias_ma_rsi_global:
-                    print(f"\n>>> CONVERGENCIAS MA FILTRADAS: {len(convergencias_ma_rsi_global)}")
+                    print(f"\nCONVERGENCIAS MA FILTRADAS: {len(convergencias_ma_rsi_global)}")
                     print("   (Se omiten señales consecutivas del mismo tipo)")
                     for i, conv in enumerate(convergencias_ma_rsi_global, 1):
                         tipo_emoji = "SELL" if conv['tipo'] == 'VENTA_CONVERGENCIA' else "BUY"
@@ -1136,9 +975,6 @@ def actualizar_grafico():
             
             # Marcar convergencias RSI extremo + MACD Signal cruce por 0
             num_convergencias = marcar_convergencias_rsi_macd(axes, df)
-            
-            # Marcar señales de trading combinadas RSI + MACD + MA
-            num_senales = marcar_senales_trading_combinadas(axes, df)
             
             # Panel 1: RSI
             axes[1].plot(df_plot['Date'], df_plot['RSI'], color='blue', label='RSI')
@@ -1174,7 +1010,8 @@ def actualizar_grafico():
                 if ax != axes[0]:  # Solo rotar en el panel principal
                     plt.setp(ax.xaxis.get_majorticklabels(), rotation=0)
             
-            fig.suptitle(f'{symbol} - Scalping Analysis (1s) UTC-5')
+            nombre_archivo = os.path.basename(archivo_csv_seleccionado) if archivo_csv_seleccionado else "CSV"
+            fig.suptitle(f'{nombre_archivo} - Scalping Analysis CSV | MA1: {UMBRAL_MA1}, MA2: {UMBRAL_MA2}')
             fig.tight_layout()
             
 
@@ -1220,12 +1057,7 @@ def actualizar_grafico():
                 except Exception:
                     estadisticas_extremos += " | RSI+MACD Cruces: 0"
             
-            # Agregar información de señales combinadas si están activadas
-            if mostrar_senales_combinadas.get():
-                try:
-                    estadisticas_extremos += f" | Señales Trading: {num_senales}"
-                except Exception:
-                    estadisticas_extremos += " | Señales Trading: 0"
+
             
             # Agregar información de segmentos de tendencia MA si están activados
             if mostrar_ma.get() or mostrar_ma2.get():
@@ -1243,9 +1075,14 @@ def actualizar_grafico():
                         info_mas.append(f"MA2({len(segmentos_ma2)})")
                     
                     if todos_segmentos:
-                        # Contar tipos de tendencias total
-                        alcistas = sum(1 for s in todos_segmentos if s['pendiente'] > 0.0002)
-                        bajistas = sum(1 for s in todos_segmentos if s['pendiente'] < -0.0002)
+                        # Contar tipos de tendencias por MA con sus umbrales específicos
+                        alcistas_ma1 = sum(1 for s in segmentos_ma1 if s['pendiente'] > UMBRAL_MA1) if segmentos_ma1 else 0
+                        bajistas_ma1 = sum(1 for s in segmentos_ma1 if s['pendiente'] < -UMBRAL_MA1) if segmentos_ma1 else 0
+                        alcistas_ma2 = sum(1 for s in segmentos_ma2 if s['pendiente'] > UMBRAL_MA2) if segmentos_ma2 else 0
+                        bajistas_ma2 = sum(1 for s in segmentos_ma2 if s['pendiente'] < -UMBRAL_MA2) if segmentos_ma2 else 0
+                        
+                        alcistas = alcistas_ma1 + alcistas_ma2
+                        bajistas = bajistas_ma1 + bajistas_ma2
                         laterales = len(todos_segmentos) - alcistas - bajistas
                         mas_info = " + ".join(info_mas)
                         estadisticas_extremos += f" | Tendencias {mas_info}: ↗{alcistas}, ↘{bajistas}, →{laterales}"
@@ -1269,29 +1106,289 @@ def actualizar_grafico():
             
         root.after(1000, actualizar_grafico)  # Actualizar cada segundo
 
-def detener_app():
-    global actualizando, root
+def limpiar_convergencias():
+    """Limpia todas las convergencias persistentes acumuladas"""
+    global convergencias_persistentes
+    convergencias_persistentes.clear()
+    print("Convergencias persistentes limpiadas")
+
+def actualizar_info_datos():
+    """Actualiza la información mostrada sobre el rango de datos disponible"""
+    global fecha_inicio_datos, fecha_fin_datos, total_registros
+    
+    if fecha_inicio_datos and fecha_fin_datos:
+        # Calcular duración
+        duracion = fecha_fin_datos - fecha_inicio_datos
+        dias = duracion.days
+        horas = duracion.seconds // 3600
+        minutos = (duracion.seconds % 3600) // 60
+        
+        # Formatear fechas
+        inicio_str = fecha_inicio_datos.strftime("%Y-%m-%d %H:%M:%S")
+        fin_str = fecha_fin_datos.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Crear texto informativo
+        if dias > 0:
+            duracion_str = f"{dias}d {horas}h {minutos}m"
+        elif horas > 0:
+            duracion_str = f"{horas}h {minutos}m"
+        else:
+            duracion_str = f"{minutos}m"
+        
+        info_texto = f"Datos: {inicio_str} → {fin_str} | Duración: {duracion_str} | Registros: {total_registros:,}"
+        
+        # Actualizar label en la interfaz
+        if 'label_info_datos' in globals():
+            label_info_datos.config(text=info_texto)
+        
+        # Configurar el slider
+        if 'slider_tiempo' in globals():
+            configurar_slider_tiempo()
+
+def configurar_slider_tiempo():
+    """Configura el slider basado en los datos disponibles"""
+    global fecha_inicio_datos, fecha_fin_datos, total_registros
+    
+    if not fecha_inicio_datos or not fecha_fin_datos:
+        return
+    
+    # Calcular número máximo de posiciones del slider
+    tiempo_seleccionado = tiempo_var.get()
+    limit = TIEMPO_OPTIONS[tiempo_seleccionado]
+    
+    # El slider va desde 0 hasta (total_registros - limit)
+    max_posicion = max(0, total_registros - limit)
+    
+    slider_tiempo.config(from_=0, to=max_posicion)
+    slider_tiempo.set(max_posicion)  # Iniciar al final (datos más recientes)
+
+def obtener_datos_por_posicion(posicion=None):
+    """Obtiene un subconjunto de datos basado en la posición del slider"""
+    global df_completo
+    
+    if df_completo is None:
+        return None
+    
+    tiempo_seleccionado = tiempo_var.get()
+    limit = TIEMPO_OPTIONS[tiempo_seleccionado]
+    
+    if posicion is None:
+        # Si no se especifica posición, usar la posición actual del slider
+        posicion = slider_tiempo.get() if 'slider_tiempo' in globals() else len(df_completo) - limit
+    
+    # Calcular índices de inicio y fin
+    inicio_idx = int(posicion)
+    fin_idx = min(inicio_idx + limit, len(df_completo))
+    
+    # Obtener subconjunto de datos
+    df_subset = df_completo.iloc[inicio_idx:fin_idx].copy()
+    
+    return df_subset
+
+def on_slider_change(value):
+    """Callback cuando cambia el slider"""
+    if not actualizando:
+        # Forzar actualización del gráfico con nueva posición
+        actualizar_grafico_manual()
+
+def actualizar_grafico_manual():
+    """Actualiza el gráfico manualmente basado en la posición del slider"""
+    global axes, mostrar_ma, ma_periodo, archivo_csv_seleccionado
+    
+    if not archivo_csv_seleccionado or df_completo is None:
+        return
+    
     try:
-        print("Cerrando aplicación...")
+        plt.style.use('dark_background')
+        
+        # Obtener datos según posición del slider
+        df = obtener_datos_por_posicion()
+        if df is None or len(df) == 0:
+            return
+            
+        df = procesar_indicadores(df)
+        
+        for ax in axes:
+            ax.clear()
+            
+        # Panel 0: Velas + MA
+        import matplotlib.dates as mdates
+        df_plot = df.reset_index()
+        df_plot['Date'] = mdates.date2num(df_plot['Close time'])
+        ohlc = df_plot[['Date', 'Open', 'High', 'Low', 'Close']].values
+
+        # Calcular ancho de barra (80% del intervalo)
+        if len(df_plot['Date']) > 1:
+            interval_width = (df_plot['Date'][1] - df_plot['Date'][0]) * 0.8
+        else:
+            interval_width = 0.0008
+
+        from mplfinance.original_flavor import candlestick_ohlc
+        candlestick_ohlc(axes[0], ohlc, width=interval_width, colorup='g', colordown='r')
+        
+        # Agregar MA seleccionada si está activada
+        if mostrar_ma.get():
+            periodo_seleccionado = ma_periodo.get()
+            colores_ma = {"MA3": "magenta", "MA7": "red", "MA14": "cyan", "MA25": "orange", "MA50": "purple", "MA99": "blue"}
+            color_ma = colores_ma.get(periodo_seleccionado, "purple")
+            axes[0].plot(df_plot['Date'], df_plot[periodo_seleccionado], color=color_ma, linewidth=1.5, label=periodo_seleccionado, alpha=0.8)
+        
+        # Agregar segunda MA si está activada
+        if mostrar_ma2.get():
+            periodo_seleccionado2 = ma2_periodo.get()
+            colores_ma2 = {"MA3": "lightcoral", "MA7": "lightblue", "MA14": "lightyellow", "MA25": "lightgreen", "MA50": "lightpink", "MA99": "lightgray"}
+            color_ma2 = colores_ma2.get(periodo_seleccionado2, "lightgray")
+            axes[0].plot(df_plot['Date'], df_plot[periodo_seleccionado2], color=color_ma2, linewidth=1.5, label=periodo_seleccionado2, alpha=0.7)
+        
+        # Mostrar leyenda si hay alguna MA activa
+        if mostrar_ma.get() or mostrar_ma2.get():
+            axes[0].legend(loc='upper left')
+        
+        axes[0].set_title(obtener_titulo_panel())
+        axes[0].set_ylabel('Precio')
+        axes[0].xaxis_date()
+        
+        # Aplicar análisis como en la función original
+        marcar_extremos_rsi(axes, df)
+        segmentos_ma1, segmentos_ma2 = calcular_lineas_tendencia_ma(axes, df)
+        
+        global convergencias_ma_rsi_global
+        if mostrar_convergencias_ma_rsi.get():
+            convergencias_ma_rsi_global = marcar_convergencias_doble_ma_rsi(axes, df, segmentos_ma1, segmentos_ma2)
+        else:
+            convergencias_ma_rsi_global = []
+        
+        num_convergencias = marcar_convergencias_rsi_macd(axes, df)
+        
+        # Panel 1: RSI
+        axes[1].plot(df_plot['Date'], df_plot['RSI'], color='blue', label='RSI')
+        axes[1].axhline(70, color='red', linestyle='--', alpha=0.7, label='Sobrecompra (70)')
+        axes[1].axhline(30, color='green', linestyle='--', alpha=0.7, label='Sobreventa (30)')
+        axes[1].fill_between(df_plot['Date'], 70, 100, alpha=0.1, color='red')
+        axes[1].fill_between(df_plot['Date'], 0, 30, alpha=0.1, color='green')
+        axes[1].set_title('RSI (Zonas extremas resaltadas)')
+        axes[1].set_ylabel('RSI')
+        axes[1].legend()
+        axes[1].set_ylim(0, 100)
+        
+        # Panel 2: MACD
+        axes[2].plot(df_plot['Date'], df_plot['MACD'], color='white', label='MACD')
+        axes[2].plot(df_plot['Date'], df_plot['Signal'], color='orange', label='Signal')
+        axes[2].axhline(0, color='grey', linestyle='--')
+        macd_delta = df_plot['MACD'] - df_plot['Signal']
+        axes[2].bar(
+            df_plot['Date'],
+            macd_delta,
+            width=interval_width,
+            color=['green' if v >= 0 else 'red' for v in macd_delta],
+            alpha=0.5,
+            label='MACD Delta'
+        )
+        axes[2].set_title('MACD')
+        axes[2].set_ylabel('MACD')
+        axes[2].legend()
+        
+        # Aplicar formato de fecha
+        for ax in axes:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            if ax != axes[0]:
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=0)
+        
+        nombre_archivo = os.path.basename(archivo_csv_seleccionado) if archivo_csv_seleccionado else "CSV"
+        fig.suptitle(f'{nombre_archivo} - Scalping Analysis CSV | MA1: {UMBRAL_MA1}, MA2: {UMBRAL_MA2}')
+        fig.tight_layout()
+        
+        # Mostrar valores actuales
+        mostrar_valores_actuales(df)
+        
+        # Actualizar estadísticas
+        rsi_extremos = len(df[(df['RSI'] > 70) | (df['RSI'] < 30)])
+        rsi_sobrecompra = len(df[df['RSI'] > 70])
+        rsi_sobreventa = len(df[df['RSI'] < 30])
+        
+        estadisticas_base = f"RSI Extremos: {rsi_extremos} | Sobrecompra: {rsi_sobrecompra} | Sobreventa: {rsi_sobreventa}"
+        
+        # Mostrar información de posición temporal
+        posicion_actual = slider_tiempo.get() if 'slider_tiempo' in globals() else 0
+        fecha_actual_inicio = df.index[0] if len(df) > 0 else "N/A"
+        fecha_actual_fin = df.index[-1] if len(df) > 0 else "N/A"
+        
+        info_posicion = f" | Mostrando: {fecha_actual_inicio.strftime('%H:%M:%S')} → {fecha_actual_fin.strftime('%H:%M:%S')}"
+        
+        label_signals.config(text=f"{estadisticas_base}{info_posicion}")
+        
+        canvas.draw()
+        
+    except Exception as e:
+        print(f"Error al actualizar gráfico manual: {e}")
+
+def seleccionar_archivo():
+    """Abre un diálogo para seleccionar archivo CSV"""
+    global archivo_csv_seleccionado, df_completo, fecha_inicio_datos, fecha_fin_datos, total_registros
+    
+    filetypes = [
+        ('CSV files', '*.csv'),
+        ('All files', '*.*')
+    ]
+    
+    filename = filedialog.askopenfilename(
+        title='Seleccionar archivo CSV',
+        initialdir=os.getcwd(),
+        filetypes=filetypes
+    )
+    
+    if filename:
+        # Resetear variables cuando se selecciona nuevo archivo
+        archivo_csv_seleccionado = filename
+        df_completo = None
+        fecha_inicio_datos = None
+        fecha_fin_datos = None
+        total_registros = 0
+        
+        archivo_label.config(text=f"Archivo: {os.path.basename(filename)}")
+        label_info_datos.config(text="Cargando datos...")
+        print(f"Archivo CSV seleccionado: {filename}")
+        
+        # Cargar datos inicialmente
+        try:
+            obtener_historico_binance("CSV_DATA", "1s", limit=None)
+        except Exception as e:
+            label_info_datos.config(text=f"Error: {e}")
+            print(f"Error al cargar archivo: {e}")
+
+def detener_app():
+    """Función mejorada para cerrar la aplicación de forma segura"""
+    global actualizando
+    try:
+        # Detener actualizaciones
         actualizando = False
         
-        # Cancelar cualquier tarea pendiente de after()
-        if root:
-            for after_id in root.tk.call('after', 'info'):
-                root.after_cancel(after_id)
+        # Cancelar tareas pendientes de tkinter
+        if hasattr(root, 'after_idle'):
+            try:
+                root.after_cancel('all')
+            except:
+                pass
         
-        # Limpiar matplotlib
-        import matplotlib.pyplot as plt
-        plt.close('all')
+        # Cerrar matplotlib
+        try:
+            import matplotlib.pyplot as plt
+            plt.close('all')
+        except:
+            pass
         
         # Destruir ventana principal
         if root:
-            root.quit()
-            root.destroy()
-            
+            try:
+                root.quit()
+                root.destroy()
+            except:
+                pass
+        
     except Exception as e:
-        print(f"Error al cerrar: {e}")
+        print(f"Error al cerrar aplicación: {e}")
     finally:
+        # Salir del programa
         import sys
         sys.exit(0)
 
@@ -1313,11 +1410,7 @@ mostrar_convergencias_ma_rsi = None  # Nueva variable para convergencias MA
 mostrar_etiquetas_convergencia = None  # Control para etiquetas de convergencia
 mostrar_lineas_tendencia_ma1 = None  # Control para líneas de tendencia MA1
 mostrar_lineas_tendencia_ma2 = None  # Control para líneas de tendencia MA2
-umbral_pendiente = None  # Variable para el umbral dinámico de pendiente
-# umbral_pendiente = None  # Variable eliminada - ahora es fijo
-# umbral_callback = None  # Callback eliminado
-# actualizando_umbral = False  # Flag eliminado
-mostrar_senales_combinadas = None
+
 mostrar_ma = None
 ma_periodo = None
 mostrar_ma2 = None
@@ -1327,25 +1420,53 @@ tiempo_var = None
 if __name__ == "__main__":
     # --- Interfaz gráfica ---
     root = tk.Tk()
-    root.title("Binance Scalping Chart Analyzer - 1s RSI Extreme Zones")
+    root.title(f"Scalping Chart Analyzer - CSV Data Analysis (MA1: {UMBRAL_MA1}, MA2: {UMBRAL_MA2})")
     root.state('zoomed')  # Pantalla completa en Windows
+
+    # Frame para selección de archivo CSV
+    frame_archivo = ttk.Frame(root)
+    frame_archivo.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+    
+    ttk.Label(frame_archivo, text="Archivo CSV:").pack(side=tk.LEFT)
+    ttk.Button(frame_archivo, text="Seleccionar CSV", command=seleccionar_archivo).pack(side=tk.LEFT, padx=5)
+    archivo_label = ttk.Label(frame_archivo, text="Ningún archivo seleccionado", foreground="gray")
+    archivo_label.pack(side=tk.LEFT, padx=10)
+
+    # Frame para información de datos disponibles
+    frame_info_datos = ttk.Frame(root)
+    frame_info_datos.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+    
+    label_info_datos = tk.Label(frame_info_datos, text="Selecciona un archivo CSV para ver información de datos", 
+                               font=("Arial", 10), fg="darkblue")
+    label_info_datos.pack(side=tk.LEFT)
+    
+    # Frame para slider de tiempo
+    frame_slider = ttk.Frame(root)
+    frame_slider.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+    
+    ttk.Label(frame_slider, text="Navegar en el tiempo:").pack(side=tk.LEFT)
+    
+    slider_tiempo = tk.Scale(frame_slider, from_=0, to=100, orient=tk.HORIZONTAL, 
+                            length=400, command=on_slider_change)
+    slider_tiempo.pack(side=tk.LEFT, padx=(10, 20), fill=tk.X, expand=True)
+    
+    ttk.Button(frame_slider, text="Más recientes", 
+              command=lambda: [slider_tiempo.set(slider_tiempo.cget('to')), actualizar_grafico_manual()]).pack(side=tk.LEFT, padx=5)
+    ttk.Button(frame_slider, text="Más antiguos", 
+              command=lambda: [slider_tiempo.set(0), actualizar_grafico_manual()]).pack(side=tk.LEFT, padx=5)
 
     frame_controls = ttk.Frame(root)
     frame_controls.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
-
-    ttk.Label(frame_controls, text="Símbolo:").pack(side=tk.LEFT)
-    symbol_var = tk.StringVar(value=SYMBOLS[0])
-    symbol_menu = ttk.OptionMenu(frame_controls, symbol_var, SYMBOLS[0], *SYMBOLS)
-    symbol_menu.pack(side=tk.LEFT, padx=5)
 
     ttk.Label(frame_controls, text="Tiempo:").pack(side=tk.LEFT)
     tiempo_var = tk.StringVar(value="10 min")
     tiempo_menu = ttk.OptionMenu(frame_controls, tiempo_var, "10 min", *TIEMPO_OPTIONS.keys())
     tiempo_menu.pack(side=tk.LEFT, padx=5)
 
-    # Mostrar el intervalo fijo
-    ttk.Label(frame_controls, text=f"Intervalo: {INTERVAL} | Hora Colombia (UTC-5)").pack(side=tk.LEFT, padx=20)
+    # Mostrar información del CSV
+    ttk.Label(frame_controls, text="| Análisis desde archivo CSV").pack(side=tk.LEFT, padx=20)
 
+    ttk.Button(frame_controls, text="Limpiar Convergencias", command=limpiar_convergencias).pack(side=tk.LEFT, padx=5)
     ttk.Button(frame_controls, text="Detener y Salir", command=detener_app).pack(side=tk.LEFT, padx=10)
 
     # Frame para los checkboxes de sombreado
@@ -1385,7 +1506,7 @@ if __name__ == "__main__":
                 print("✅ Auto-activando líneas de tendencia MA2")
         # Si se desactiva, no desactivar nada más (como solicitaste)
     
-    checkbox_conv_ma_rsi = ttk.Checkbutton(frame_checkboxes, text=">>> Convergencias MA", 
+    checkbox_conv_ma_rsi = ttk.Checkbutton(frame_checkboxes, text="Convergencias MA", 
                                           variable=mostrar_convergencias_ma_rsi,
                                           command=on_convergencias_ma_change)
     checkbox_conv_ma_rsi.pack(side=tk.LEFT, padx=10)
@@ -1448,55 +1569,9 @@ if __name__ == "__main__":
                                              variable=mostrar_etiquetas_convergencia)
     checkbox_etiquetas_conv.pack(side=tk.LEFT, padx=10)
 
-    # --- Frame para control dinámico del umbral ---
-    frame_umbral = ttk.Frame(root)
-    frame_umbral.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
-    
-    ttk.Label(frame_umbral, text="Umbral Pendiente:").pack(side=tk.LEFT)
-    
-    # Variable para el umbral dinámico
-    umbral_pendiente = tk.DoubleVar(value=0.0002)
-    
-    # Función para actualizar la etiqueta del umbral
-    def actualizar_etiqueta_umbral(value):
-        valor_actual = float(value)
-        label_umbral_valor.config(text=f"±{valor_actual:.6f}")
-        return True
-    
-    # Slider para el umbral (rango de 0.0001 a 0.005)
-    scale_umbral = tk.Scale(frame_umbral, from_=0.0001, to=0.005, resolution=0.0001,
-                           orient=tk.HORIZONTAL, variable=umbral_pendiente,
-                           command=actualizar_etiqueta_umbral, length=200)
-    scale_umbral.pack(side=tk.LEFT, padx=5)
-    
-    # Etiqueta que muestra el valor actual
-    label_umbral_valor = ttk.Label(frame_umbral, text="±0.000200")
-    label_umbral_valor.pack(side=tk.LEFT, padx=5)
-    
-    # Botones predefinidos para valores comunes
-    frame_presets = ttk.Frame(frame_umbral)
-    frame_presets.pack(side=tk.LEFT, padx=10)
-    
-    def set_umbral(valor):
-        umbral_pendiente.set(valor)
-        actualizar_etiqueta_umbral(valor)
-    
-    ttk.Button(frame_presets, text="Ultra", command=lambda: set_umbral(0.0001), width=6).pack(side=tk.LEFT, padx=2)
-    ttk.Button(frame_presets, text="Sensible", command=lambda: set_umbral(0.0002), width=8).pack(side=tk.LEFT, padx=2)
-    ttk.Button(frame_presets, text="Moderado", command=lambda: set_umbral(0.001), width=8).pack(side=tk.LEFT, padx=2)
-    ttk.Button(frame_presets, text="Conservador", command=lambda: set_umbral(0.002), width=10).pack(side=tk.LEFT, padx=2)
 
-    # --- Frame para señales combinadas ---
-    frame_senales = ttk.Frame(root)
-    frame_senales.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
-    
-    # Checkbox para señales combinadas RSI + MACD + MA
-    mostrar_senales_combinadas = tk.BooleanVar(value=False)
-    checkbox_senales_combinadas = ttk.Checkbutton(frame_senales, text="Señales de Trading: RSI + MACD + MA (Compra/Venta)", 
-                                                 variable=mostrar_senales_combinadas)
-    checkbox_senales_combinadas.pack(side=tk.LEFT, padx=10)
 
-    label_valores = tk.Label(root, text="Análisis de Scalping: RSI Extremos, MACD Convergencias y Señales de Trading (UTC-5)", font=("Arial", 12), fg="blue")
+    label_valores = tk.Label(root, text="Análisis de Scalping desde CSV: RSI Extremos y MACD Convergencias", font=("Arial", 12), fg="blue")
     label_valores.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
 
     label_signals = tk.Label(root, text="", font=("Arial", 12), fg="darkgreen")
