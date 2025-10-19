@@ -8,7 +8,7 @@ import estrategia2
 # --- Configuración de Binance US ---
 SYMBOLS = ["BNBUSDT", "BTCUSDT", "ETHUSDT", "ADAUSDT", "DOGEUSDT"]
 INTERVALS = ["1s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-BINANCE_URL = "https://api.binance.us/api/v3/klines"
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
 def obtener_datos_binance(symbol, interval, limit=10000):
     """Obtiene datos históricos de velas desde Binance US con paginación hacia atrás (endTime) hasta 10000.
@@ -128,24 +128,43 @@ def mostrar_tabla_estadisticas(df, symbol="", interval=""):
 
     for _, row in stats_df.iterrows():
             valor = row.get("Valor", 0)
+            estadistica = row.get("Estadística", "")
+            
+            # Formatear valor según el tipo
             if isinstance(valor, str):
                 valor_str = valor
+            elif valor == 0 or valor == "":
+                valor_str = ""
             else:
                 valor_str = "{0:.6f}".format(valor)
-            open_high_str = "{0}".format(row.get("Open/High", "")) if row.get("Open/High", "") != "" else ""
-            close_low_str = "{0}".format(row.get("Close/Low", "")) if row.get("Close/Low", "") != "" else ""
+            
+            # Formatear campos numéricos
+            open_high_str = "{0:.6f}".format(row.get("Open/High", "")) if row.get("Open/High", "") != "" and isinstance(row.get("Open/High", ""), (int, float)) else str(row.get("Open/High", ""))
+            close_low_str = "{0:.6f}".format(row.get("Close/Low", "")) if row.get("Close/Low", "") != "" and isinstance(row.get("Close/Low", ""), (int, float)) else str(row.get("Close/Low", ""))
+        
+            # Estilo especial para headers de análisis detallado
+            tags = ()
+            if "ANÁLISIS DETALLADO P90-100" in estadistica:
+                tags = ("header",)
+            elif "P90-100:" in estadistica:
+                tags = ("detail",)
         
             tree.insert(
                 "", tk.END,
                 values=(
-                    row.get("Estadística", ""),
+                    estadistica,
                     valor_str,
                     row.get("Fecha/Hora", ""),
                     open_high_str,
                     close_low_str
-                )
+                ),
+                tags=tags
             )
 
+    # Configurar estilos para destacar el análisis P90-100
+    tree.tag_configure("header", background="#e6f3ff", font=("Arial", 9, "bold"))
+    tree.tag_configure("detail", background="#f0f8ff")
+    
     tree.pack(fill=tk.BOTH, expand=True)
     ttk.Button(root, text="Cerrar", command=root.destroy).pack(pady=10)
     root.mainloop()

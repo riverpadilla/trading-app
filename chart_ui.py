@@ -12,7 +12,7 @@ import estrategia
 # --- Parámetros de la interfaz ---
 SYMBOLS = ["BNBUSDT", "USDTARS"]
 INTERVALS = ["1s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-BINANCE_URL = "https://api.binance.us/api/v3/klines"
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
 """Funciones para calcular indicadores técnicos usando TA-Lib."""
 def sma(values, window):

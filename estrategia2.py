@@ -10,6 +10,7 @@ def calcular_deciles(valores: pd.Series) -> list:
         'rango': (valor_min, valor_max) del bin
         'frecuencia': cantidad de elementos en el bin
         'porcentaje': frecuencia en % respecto al total
+        'datos': serie con los valores del decil (para análisis detallado)
     """
     n = int(len(valores))
     if n == 0:
@@ -34,15 +35,119 @@ def calcular_deciles(valores: pd.Series) -> list:
             mask = (serie > low) & (serie <= high)
         freq = int(mask.sum())
         
+        # Guardar los datos del decil para análisis detallado
+        datos_decil = serie[mask]
+        
         resultados.append({
             'percentil': f'P{i*10}-{(i+1)*10}',
             'rango': (low, high),
             'frecuencia': freq,
-            'porcentaje': (freq / n) * 100.0 if n > 0 else 0.0
+            'porcentaje': (freq / n) * 100.0 if n > 0 else 0.0,
+            'datos': datos_decil
         })
     
     return resultados
 
+
+def analizar_decil_p90_100(df: pd.DataFrame, decil_data: pd.Series, metric_name: str) -> list:
+    """
+    Analiza en detalle el decil P90-100 mostrando eventos extremos.
+    
+    Args:
+        df: DataFrame original con datos OHLC
+        decil_data: Serie con los valores del decil P90-100
+        metric_name: Nombre de la métrica ('Var_Apertura_Cierre' o 'Diff_High_Low')
+    
+    Returns:
+        Lista de estadísticas detalladas del decil P90-100
+    """
+    if decil_data.empty:
+        return []
+    
+    stats_p90 = []
+    
+    # Estadísticas básicas del P90-100
+    valores_p90 = decil_data.sort_values(ascending=False)
+    
+    stats_p90.append({
+        'Estadística': f'--- ANÁLISIS DETALLADO P90-100 ({metric_name}) ---',
+        'Valor': '',
+        'Fecha/Hora': '',
+        'Open/High': '',
+        'Close/Low': ''
+    })
+    
+    stats_p90.append({
+        'Estadística': f'P90-100: Cantidad de eventos extremos',
+        'Valor': len(valores_p90),
+        'Fecha/Hora': f'{len(valores_p90)} de {len(df)} total',
+        'Open/High': '',
+        'Close/Low': f'{(len(valores_p90)/len(df)*100):.2f}%'
+    })
+    
+    stats_p90.append({
+        'Estadística': f'P90-100: Promedio de eventos extremos',
+        'Valor': float(valores_p90.mean()),
+        'Fecha/Hora': '',
+        'Open/High': '',
+        'Close/Low': ''
+    })
+    
+    stats_p90.append({
+        'Estadística': f'P90-100: Mediana de eventos extremos',
+        'Valor': float(valores_p90.median()),
+        'Fecha/Hora': '',
+        'Open/High': '',
+        'Close/Low': ''
+    })
+    
+    # Top 5 eventos más extremos
+    top_5_indices = valores_p90.head(5).index
+    
+    for i, idx in enumerate(top_5_indices, 1):
+        valor = valores_p90[idx]
+        
+        # Obtener datos de la fila correspondiente
+        if idx in df.index:
+            row_data = df.loc[idx]
+            if metric_name == 'Var_Apertura_Cierre':
+                open_val = row_data.get('Open', '')
+                close_val = row_data.get('Close', '')
+            else:  # Diff_High_Low
+                open_val = row_data.get('High', '')
+                close_val = row_data.get('Low', '')
+        else:
+            open_val = close_val = ''
+        
+        stats_p90.append({
+            'Estadística': f'P90-100: Evento #{i} más extremo',
+            'Valor': float(valor),
+            'Fecha/Hora': str(idx),
+            'Open/High': float(open_val) if open_val != '' else '',
+            'Close/Low': float(close_val) if close_val != '' else ''
+        })
+    
+    # Distribución dentro del P90-100
+    q95 = valores_p90.quantile(0.5)  # Mediana dentro del P90-100
+    q99 = valores_p90.quantile(0.1)  # Top 10% dentro del P90-100 (P99)
+    
+    stats_p90.append({
+        'Estadística': f'P90-100: Valor P95 (mediana del decil)',
+        'Valor': float(q95),
+        'Fecha/Hora': 'Divide P90-100 en dos mitades',
+        'Open/High': '',
+        'Close/Low': ''
+    })
+    
+    stats_p90.append({
+        'Estadística': f'P90-100: Valor P99 (top 10% del decil)',
+        'Valor': float(q99),
+        'Fecha/Hora': 'Eventos más extremos',
+        'Open/High': '',
+        'Close/Low': ''
+    })
+    
+    return stats_p90
 
 def calcular_estadisticas(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -111,7 +216,7 @@ def calcular_estadisticas(df: pd.DataFrame) -> pd.DataFrame:
     })
 
     # Agregar los 10 deciles de variación
-    for decil in deciles_var:
+    for i, decil in enumerate(deciles_var):
         stats.append({
             'Estadística': f"Variación {decil['percentil']} (Apertura-Cierre)",
             'Valor': f"{decil['rango'][0]:.6f} – {decil['rango'][1]:.6f}",
@@ -119,6 +224,11 @@ def calcular_estadisticas(df: pd.DataFrame) -> pd.DataFrame:
             'Open/High': '',
             'Close/Low': f"{decil['porcentaje']:.2f}%"
         })
+        
+        # Análisis detallado del P90-100 para variación
+        if decil['percentil'] == 'P90-100' and len(decil['datos']) > 0:
+            stats_p90_var = analizar_decil_p90_100(work, decil['datos'], 'Var_Apertura_Cierre')
+            stats.extend(stats_p90_var)
 
     stats.append({
         'Estadística': 'Máxima diferencia absoluta (High-Low)',
@@ -145,6 +255,11 @@ def calcular_estadisticas(df: pd.DataFrame) -> pd.DataFrame:
             'Open/High': '',
             'Close/Low': f"{decil['porcentaje']:.2f}%"
         })
+        
+        # Análisis detallado del P90-100 para diferencia
+        if decil['percentil'] == 'P90-100' and len(decil['datos']) > 0:
+            stats_p90_diff = analizar_decil_p90_100(work, decil['datos'], 'Diff_High_Low')
+            stats.extend(stats_p90_diff)
 
     stats.append({
         'Estadística': 'Promedio variación absoluta (Apertura-Cierre)',
