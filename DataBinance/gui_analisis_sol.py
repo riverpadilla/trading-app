@@ -2,7 +2,8 @@
 """
 GUI Profesional para Análisis Técnico SOL/USDT
 Interfaz gráfica con descarga de datos, análisis y visualización de gráficos
-Requisitos: pip install pandas numpy matplotlib python-binance
+Genera reportes PDF con gráficos incluidos
+Requisitos: pip install pandas numpy matplotlib python-binance reportlab pillow
 """
 
 import tkinter as tk
@@ -16,12 +17,25 @@ from datetime import datetime
 from pathlib import Path
 import threading
 import os
+import io
 
 try:
     from binance.client import Client
     BINANCE_AVAILABLE = True
 except ImportError:
     BINANCE_AVAILABLE = False
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak, Table, TableStyle
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from PIL import Image as PILImage
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
 
 # API Keys hardcode (SOL Trading Anaysis Keys)
 API_KEY = "ghf17lXepHDblRsp1Q2i9XPdPVCrzx7TO74SWDbhaNB6bKSGlQOXlHew5YTuer34"
@@ -562,6 +576,236 @@ class GUIAnalisisSol:
         self.text_archivos.insert(tk.END, texto)
         self.notebook.select(4)  # Cambiar a pestaña de archivos
     
+    def guardar_reporte_pdf(self):
+        """Genera y guarda un reporte en PDF con gráficos"""
+        try:
+            if not REPORTLAB_AVAILABLE:
+                raise Exception("Requiere: pip install reportlab pillow")
+            
+            # Crear PDF
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pdf_filename = f"reporte_SOLUSDT_{timestamp}.pdf"
+            doc = SimpleDocTemplate(pdf_filename, pagesize=A4)
+            story = []
+            
+            # Estilos
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=24,
+                textColor=colors.HexColor("#001AFF"),
+                spaceAfter=30,
+                alignment=TA_CENTER
+            )
+            heading_style = ParagraphStyle(
+                'CustomHeading',
+                parent=styles['Heading2'],
+                fontSize=14,
+                textColor=colors.HexColor('#001AFF'),
+                spaceAfter=12,
+                spaceBefore=12
+            )
+            normal_style = ParagraphStyle(
+                'CustomNormal',
+                parent=styles['Normal'],
+                fontSize=10,
+                spaceAfter=6
+            )
+            
+            # Título
+            story.append(Paragraph("ANÁLISIS TÉCNICO SOL/USDT", title_style))
+            story.append(Spacer(1, 0.3 * inch))
+            
+            # Resumen
+            story.append(Paragraph("📊 RESUMEN EJECUTIVO", heading_style))
+            resultado = self.analizador.resultados
+            
+            resumen_data = [
+                ["Precio Actual:", f"${resultado['precio_actual']:.2f}"],
+                ["Timestamp:", resultado['timestamp']],
+                ["Fuente de Datos:", resultado['fuente'].upper()],
+                ["Confianza LONG:", f"{resultado['recomendaciones_long'].get('confianza', 0):.0f}%"],
+                ["Confianza SHORT:", f"{resultado['recomendaciones_short'].get('confianza', 0):.0f}%"],
+            ]
+            
+            resumen_table = Table(resumen_data, colWidths=[2*inch, 4*inch])
+            resumen_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#000000")),
+                ('TEXTCOLOR', (0, 0), (0, -1), colors.white),
+                ('TEXTCOLOR', (1, 0), (1, -1), colors.black),
+                ('BACKGROUND', (1, 0), (1, -1), colors.white),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey)
+            ]))
+            story.append(resumen_table)
+            story.append(Spacer(1, 0.3 * inch))
+            
+            # Archivos utilizados
+            story.append(Paragraph("📁 ARCHIVOS UTILIZADOS", heading_style))
+            archivos_data = [["Timeframe", "Archivo", "Registros"]]
+            for tf in sorted(resultado['archivo_info'].keys()):
+                info = resultado['archivo_info'][tf]
+                archivos_data.append([tf.upper(), info['archivo'], f"{info['registros']:,}"])
+            
+            archivos_table = Table(archivos_data, colWidths=[1*inch, 3*inch, 1.5*inch])
+            archivos_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#00FFFF')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey)
+            ]))
+            story.append(archivos_table)
+            story.append(PageBreak())
+            
+            # Indicadores
+            story.append(Paragraph("📈 INDICADORES TÉCNICOS", heading_style))
+            indicadores_data = [["Timeframe", "RSI", "Estado", "MACD", "Signal"]]
+            for tf in ['1m', '5m', '15m', '1h', '4h', '1d']:
+                if tf in resultado['rsi']:
+                    rsi = resultado['rsi'][tf]
+                    macd = resultado['macd'].get(tf, {})
+                    indicadores_data.append([
+                        tf.upper(),
+                        f"{rsi['valor']:.2f}",
+                        rsi['estado'],
+                        f"{macd.get('valor', 0):.6f}",
+                        f"{macd.get('signal', 0):.6f}"
+                    ])
+            
+            indicadores_table = Table(indicadores_data, colWidths=[1*inch, 1*inch, 1.2*inch, 1.4*inch, 1.4*inch])
+            indicadores_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#00FFFF')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey)
+            ]))
+            story.append(indicadores_table)
+            story.append(Spacer(1, 0.3 * inch))
+            
+            # Estrategias
+            story.append(Paragraph("🎯 ESTRATEGIAS OPERATIVAS", heading_style))
+            
+            long = resultado.get('recomendaciones_long', {})
+            short = resultado.get('recomendaciones_short', {})
+            
+            estrategias_data = [
+                ["CONCEPTO", "LONG", "SHORT"],
+                ["Confianza", f"{long.get('confianza', 0):.0f}%", f"{short.get('confianza', 0):.0f}%"],
+                ["Entrada 1", f"${long.get('entrada_1', 0):.2f}", f"${short.get('entrada_1', 0):.2f}"],
+                ["Entrada 2", f"${long.get('entrada_2', 0):.2f}", f"${short.get('entrada_2', 0):.2f}"],
+                ["Target 1", f"${long.get('target_1', 0):.2f}", f"${short.get('target_1', 0):.2f}"],
+                ["Target 2", f"${long.get('target_2', 0):.2f}", f"${short.get('target_2', 0):.2f}"],
+                ["Stop Loss", f"${long.get('stop_loss', 0):.2f}", f"${short.get('stop_loss', 0):.2f}"],
+                ["Riesgo", f"-{long.get('riesgo', 0):.2f}%", f"+{short.get('riesgo', 0):.2f}%"],
+                ["Ganancia", f"+{long.get('ganancia', 0):.2f}%", f"+{short.get('ganancia', 0):.2f}%"],
+            ]
+            
+            estrategias_table = Table(estrategias_data, colWidths=[2*inch, 2*inch, 2*inch])
+            estrategias_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#00FFFF')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                ('BACKGROUND', (1, 1), (1, -1), colors.HexColor('#90EE90')),
+                ('BACKGROUND', (2, 1), (2, -1), colors.HexColor('#FFB6C6')),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey)
+            ]))
+            story.append(estrategias_table)
+            story.append(PageBreak())
+            
+            # Gráficos
+            story.append(Paragraph("📊 GRÁFICOS TÉCNICOS", heading_style))
+            
+            if '1h' in self.analizador.dataframes:
+                df_1h = self.analizador.dataframes['1h']
+                
+                # Generar gráfico
+                fig = plt.Figure(figsize=(7, 5), dpi=100, facecolor='white')
+                
+                ax1 = fig.add_subplot(2, 2, 1)
+                ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['Close'].iloc[-50:], label='Close', color='cyan', linewidth=2)
+                ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MA7'].iloc[-50:], label='MA7', color='yellow', alpha=0.7)
+                ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MA25'].iloc[-50:], label='MA25', color='orange', alpha=0.7)
+                ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MA99'].iloc[-50:], label='MA99', color='red', alpha=0.7)
+                ax1.set_title('Precio y Medias Móviles', fontsize=10, fontweight='bold')
+                ax1.legend(loc='best', fontsize=8)
+                ax1.grid(alpha=0.2)
+                ax1.set_facecolor('#f5f5f5')
+                
+                ax2 = fig.add_subplot(2, 2, 2)
+                ax2.plot(range(len(df_1h)-50, len(df_1h)), df_1h['RSI'].iloc[-50:], color='cyan', linewidth=2)
+                ax2.axhline(y=70, color='red', linestyle='--', alpha=0.5, label='Sobrecompra')
+                ax2.axhline(y=30, color='green', linestyle='--', alpha=0.5, label='Sobreventa')
+                ax2.fill_between(range(len(df_1h)-50, len(df_1h)), 30, 70, alpha=0.1, color='gray')
+                ax2.set_title('RSI(14)', fontsize=10, fontweight='bold')
+                ax2.legend(loc='best', fontsize=8)
+                ax2.set_ylim(0, 100)
+                ax2.grid(alpha=0.2)
+                ax2.set_facecolor('#f5f5f5')
+                
+                ax3 = fig.add_subplot(2, 2, 3)
+                ax3.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MACD'].iloc[-50:], label='MACD', color='cyan', linewidth=2)
+                ax3.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MACD_Signal'].iloc[-50:], label='Signal', color='red', linewidth=2)
+                ax3.bar(range(len(df_1h)-50, len(df_1h)), df_1h['MACD_Histogram'].iloc[-50:], label='Histogram', color='gray', alpha=0.3)
+                ax3.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+                ax3.set_title('MACD', fontsize=10, fontweight='bold')
+                ax3.legend(loc='best', fontsize=8)
+                ax3.grid(alpha=0.2)
+                ax3.set_facecolor('#f5f5f5')
+                
+                ax4 = fig.add_subplot(2, 2, 4)
+                colors_vol = ['green' if df_1h['Close'].iloc[i] >= df_1h['Open'].iloc[i] else 'red' 
+                              for i in range(len(df_1h)-50, len(df_1h))]
+                ax4.bar(range(len(df_1h)-50, len(df_1h)), df_1h['Volume'].iloc[-50:], color=colors_vol, alpha=0.7)
+                ax4.set_title('Volumen', fontsize=10, fontweight='bold')
+                ax4.grid(alpha=0.2, axis='y')
+                ax4.set_facecolor('#f5f5f5')
+                
+                fig.tight_layout()
+                
+                # Convertir figura a imagen
+                img_buffer = io.BytesIO()
+                fig.savefig(img_buffer, format='png', dpi=100, bbox_inches='tight')
+                img_buffer.seek(0)
+                
+                # Agregar imagen al PDF
+                temp_img_path = f"temp_graph_{timestamp}.png"
+                with open(temp_img_path, 'wb') as f:
+                    f.write(img_buffer.getvalue())
+                
+                story.append(Image(temp_img_path, width=7*inch, height=5*inch))
+                story.append(Spacer(1, 0.2 * inch))
+                
+                plt.close(fig)
+            
+            # Footer
+            story.append(Spacer(1, 0.3 * inch))
+            footer_text = f"Reporte generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Sistema de Análisis SOL/USDT"
+            story.append(Paragraph(footer_text, normal_style))
+            
+            # Generar PDF
+            doc.build(story)
+            
+            # Eliminar archivo temporal después de generar el PDF
+            if os.path.exists(temp_img_path):
+                os.remove(temp_img_path)
+ 
+            return pdf_filename
+        except Exception as e:
+            raise Exception(f"Error generando PDF: {str(e)}")
+    
     def generar_analisis(self):
         """Genera análisis y gráficos"""
         try:
@@ -575,10 +819,14 @@ class GUIAnalisisSol:
             self.actualizar_estado("⏳ Generando gráficos...")
             self.generar_graficos()
             
+            # Generar PDF
+            self.actualizar_estado("⏳ Generando reporte PDF...")
+            pdf_file = self.guardar_reporte_pdf()
+            
             self.notebook.select(0)
             
             self.actualizar_estado("✓ Análisis completado")
-            messagebox.showinfo("Éxito", "Análisis generado exitosamente")
+            messagebox.showinfo("Éxito", f"Análisis generado exitosamente\n\nReporte PDF: {pdf_file}")
         except Exception as e:
             self.actualizar_estado("✗ Error")
             messagebox.showerror("Error", str(e))
@@ -620,7 +868,7 @@ class GUIAnalisisSol:
   - Indicadores técnicos: RSI, MACD, Medias Móviles
   - Estrategias: LONG y SHORT con confianza %
   - Gráficos generados
-  - Ver pestaña "📁 Info Archivos" para detalles de archivos
+  - PDF de reporte generado automáticamente
 """
         
         self.text_resumen.insert(tk.END, texto)
@@ -736,35 +984,35 @@ Elige la estrategia con MAYOR confianza.
             
             ax1 = fig.add_subplot(2, 2, 1)
             df_1h = self.analizador.dataframes['1h']
-            ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['Close'].iloc[-50:], label='Close', color='white', linewidth=2)
+            ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['Close'].iloc[-50:], label='Close', color='cyan', linewidth=2)
             ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MA7'].iloc[-50:], label='MA7', color='yellow', alpha=0.7)
             ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MA25'].iloc[-50:], label='MA25', color='orange', alpha=0.7)
             ax1.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MA99'].iloc[-50:], label='MA99', color='red', alpha=0.7)
             ax1.set_title('SOL/USDT 1H - Precio y Medias Móviles', color='cyan', fontsize=12, fontweight='bold')
-            ax1.legend(loc='best', facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+            ax1.legend(loc='best', facecolor='#1e1e1e', edgecolor='white', labelcolor='cyan')
             ax1.grid(alpha=0.2)
             ax1.set_facecolor('#1e1e1e')
             ax1.tick_params(colors='white')
             
             ax2 = fig.add_subplot(2, 2, 2)
-            ax2.plot(range(len(df_1h)-50, len(df_1h)), df_1h['RSI'].iloc[-50:], color='white', linewidth=2)
+            ax2.plot(range(len(df_1h)-50, len(df_1h)), df_1h['RSI'].iloc[-50:], color='cyan', linewidth=2)
             ax2.axhline(y=70, color='red', linestyle='--', alpha=0.5, label='Sobrecompra')
             ax2.axhline(y=30, color='green', linestyle='--', alpha=0.5, label='Sobreventa')
             ax2.fill_between(range(len(df_1h)-50, len(df_1h)), 30, 70, alpha=0.1, color='gray')
             ax2.set_title('RSI(14) 1H', color='cyan', fontsize=12, fontweight='bold')
-            ax2.legend(loc='best', facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+            ax2.legend(loc='best', facecolor='#1e1e1e', edgecolor='white', labelcolor='cyan')
             ax2.set_ylim(0, 100)
             ax2.grid(alpha=0.2)
             ax2.set_facecolor('#1e1e1e')
             ax2.tick_params(colors='white')
             
             ax3 = fig.add_subplot(2, 2, 3)
-            ax3.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MACD'].iloc[-50:], label='MACD', color='white', linewidth=2)
+            ax3.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MACD'].iloc[-50:], label='MACD', color='cyan', linewidth=2)
             ax3.plot(range(len(df_1h)-50, len(df_1h)), df_1h['MACD_Signal'].iloc[-50:], label='Signal', color='red', linewidth=2)
             ax3.bar(range(len(df_1h)-50, len(df_1h)), df_1h['MACD_Histogram'].iloc[-50:], label='Histogram', color='gray', alpha=0.3)
             ax3.axhline(y=0, color='white', linestyle='-', alpha=0.3)
             ax3.set_title('MACD 1H', color='cyan', fontsize=12, fontweight='bold')
-            ax3.legend(loc='best', facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+            ax3.legend(loc='best', facecolor='#1e1e1e', edgecolor='white', labelcolor='cyan')
             ax3.grid(alpha=0.2)
             ax3.set_facecolor('#1e1e1e')
             ax3.tick_params(colors='white')
